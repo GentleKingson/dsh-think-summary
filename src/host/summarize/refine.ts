@@ -1,39 +1,7 @@
-/**
- * M3 小模型精炼（design.md §4.3.2）：
- *  - 门控：仅 refineEnabled 总开关；段 < 段最小窗口不精炼（省 token）
- *  - 模型来源：复用主请求的 provider，`llm.listModels` 选最小可用模型（'auto'）
- *  - 输入硬截断：只喂段尾部 refineMaxInputTokens；输出上限 refineOutputTokens
- *  - 独立队列，并发 1；绝不阻塞主请求（fire-and-forget）
- *  - 异常/中止：错误隔离回退启发式（保留原摘要）；按会话取消未完成任务
- *  - 提示词：默认固定短模板，设置页可修改（refinePrompt）
- */
+import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
+declare module '@deepseek-ai/dsh-llm' { interface LlmRequestPurposeMap { 'think-summary': true } }
 import { countRaw, estimateTokens } from '../detect.js'
-import { DEFAULT_REFINE_PROMPT } from '../config.js'
-
-export interface RefineOptions {
-  enabled?: boolean
-  /** 精炼输入预算（token）：只喂段尾部。 */
-  maxInputTokens?: number
-  /**
-   * API 完成预算（token）：必须覆盖推理+答案（探测确认该模型总是先推理；
-   * 预算不足会卡在 max-tokens 不出答案）。答案展示时再截断到 ~60 token。
-   */
-  outputTokens?: number
-  /** 'auto' = 会话 provider 的最小可用模型；或显式模型 id。 */
-  model?: string
-  /** 精炼 system 提示词（设置页可修改；缺省用默认模板）。 */
-  refinePrompt?: string
-  /** 并行精炼数（并发执行，任务之间互不打断）。 */
-  refineConcurrency?: number
-  /** 单任务超时（秒）：卡死任务超时放弃并释放并发位，防排队任务永不执行。 */
-  refineTimeout?: number
-  /**
-   * 输入裁剪策略：'headtail' 头尾裁剪（保头+尾、丢中段）；
-   * 'tail' 仅保尾部；'full' 完整保留（不裁剪）。头尾裁剪同预算信息量更高，
-   * 但中段细节可能丢失——留三档开关供用户权衡。
-   */
-  trim?: 'headtail' | 'tail' | 'full'
-}
+import { DEFAULT_REFINE_PROMPT, resolveConfig, type ThinkSummaryConfig } from '../config.js'
 
 export interface RefineTask {
   sessionId: string
@@ -46,6 +14,7 @@ export interface RefineTask {
   provider: string
   /** 主请求的 model（auto 解析失败时的兜底）。 */
   fallbackModel: string
+  signal?: AbortSignal
 }
 
 export interface RefineApply {
@@ -69,16 +38,13 @@ const DISPLAY_MAX_CHARS = 240
 
 /** llm 服务的最小可用面（防御性类型，不依赖完整契约）。 */
 export interface LlmLike {
-  stream(options: Record<string, unknown>): AsyncIterable<{ type?: string; text?: string }>
-  listModels?(provider: string): Promise<Array<Record<string, unknown>>>
-  /** rc.7 精确模型元数据查询：返回含 context.contextWindow 的解析信息。 */
-  resolveModelInfo?(provider: string, model: string, signal?: AbortSignal): Promise<Record<string, unknown>>
+  stream(options: GenerateOptions): AsyncIterable<StreamChunk>
 }
 
 /** 裁剪为尾部预算 token（从前往后丢，保留结尾）。 */
 export function trimToTokens(text: string, budget: number): string {
   let s = text
-  while (estimateTokens(s) > budget && s.length > 64) {
+  while (estimateTokens(s) > budget && s.length > 0) {
     s = s.slice(Math.ceil(s.length * 0.25))
   }
   return s
@@ -90,7 +56,7 @@ export function trimToTokens(text: string, budget: number): string {
  */
 export function headTailTrim(text: string, budget: number, headRatio = 0.3): string {
   if (estimateTokens(text) <= budget) return text
-  const headBudget = Math.max(16, Math.floor(budget * headRatio))
+  const headBudget = Math.max(0, Math.floor(budget * headRatio))
   const tailBudget = budget - headBudget
   const head = takeTokens(text, headBudget, 1)
   const tail = takeTokens(text, tailBudget, -1)
@@ -105,204 +71,118 @@ function takeTokens(text: string, budget: number, dir: 1 | -1): string {
   const avg = (raw.cjk + raw.other / 4) / Math.max(1, text.length)
   const targetChars = Math.max(1, Math.floor(budget / Math.max(0.05, avg)))
   let s = dir === 1 ? text.slice(0, targetChars) : text.slice(Math.max(0, text.length - targetChars))
-  while (estimateTokens(s) > budget && s.length > 8) {
-    s = dir === 1 ? s.slice(0, Math.ceil(s.length * 0.9)) : s.slice(Math.floor(s.length * 0.1))
+  while (estimateTokens(s) > budget && s.length > 0) {
+    s = dir === 1 ? s.slice(0, Math.floor(s.length * 0.9)) : s.slice(Math.ceil(s.length * 0.1))
   }
   return s
 }
 
-/** 从模型目录条目里读上下文窗口（旧 listModels 启发式用的松散字段）。 */
-function modelContextWindow(m: Record<string, unknown>): number | undefined {
-  const context = m.context as { contextWindow?: number } | undefined
-  const direct =
-    (m.contextWindow as number | undefined) ??
-    (m.maxTokens as number | undefined) ??
-    (m.context as number | undefined)
-  return context?.contextWindow ?? direct
-}
-
-/**
- * 'auto' 解析：provider 目录里上下文窗口最小的模型；失败回退主模型。
- * rc.7 起 listModels 返回目录不再带 contextWindow，改为逐个
- * llm.resolveModelInfo(provider, model) 精确查询（返回 context.contextWindow）
- * 打分；宿主无 resolveModelInfo（旧版）时回退 listModels 字段启发式。
- */
-export async function resolveModel(
-  llm: LlmLike,
-  provider: string,
-  fallback: string,
-): Promise<string> {
-  try {
-    const models = typeof llm.listModels === 'function' ? await llm.listModels(provider) : []
-    const list = Array.isArray(models) ? models : []
-    const ids = list.map((m) => (m && typeof m.id === 'string' ? (m.id as string) : undefined)).filter((x): x is string => Boolean(x))
-    if (ids.length === 0) return fallback
-
-    // rc.7：resolveModelInfo 精确查询 context.contextWindow（N+1，候选少可接受）
-    if (typeof llm.resolveModelInfo === 'function') {
-      let best: { id: string; score: number } | undefined
-      for (const id of ids) {
-        try {
-          const info = await llm.resolveModelInfo(provider, id)
-          const score = modelContextWindow(info as Record<string, unknown>)
-          if (score === undefined) continue
-          if (best === undefined || score < best.score) best = { id, score }
-        } catch {
-          /* 单个模型查询失败：跳过，继续下一个 */
-        }
-      }
-      if (best !== undefined) return best.id
-      // 全部查询失败：回退目录顺序第一个
-      return ids[0] ?? fallback
-    }
-
-    // 旧版回退：listModels 字段启发式
-    const scored = list
-      .filter((m) => m && typeof m.id === 'string')
-      .map((m) => ({ id: m.id as string, score: modelContextWindow(m) ?? Number.MAX_SAFE_INTEGER }))
-      .sort((a, b) => a.score - b.score)
-    if (scored[0]) return scored[0].id
-  } catch {
-    /* 目录不可用时回退主模型 */
-  }
-  return fallback
-}
-
-/**
- * 精炼队列（并发池，互不打断）：
- *  - 固定并发上限（refineConcurrency，默认 3）：任务入队即有空位并行执行，
- *    不串行排队、不互相阻塞（一个卡住不再拖住整队）
- *  - **不打断**：任务一旦入队就执行到底（不再按 think 取消/中止）——
- *    新思考/后续任务不会影响已完成思考的在途精炼（修复"部分段不精炼"）
- *  - 错误隔离：单任务失败只记日志，启发式摘要保留，不影响其他任务
- */
+/** Bounded side queue. Never inherits the primary request's tools or messages. */
 export class RefineQueue {
   private queue: RefineTask[] = []
-  private running = 0
-  private readonly getOptions: () => RefineOptions
-  private readonly getLlm: () => LlmLike | undefined
-  private readonly apply: RefineApply
-  private readonly onFail?: RefineFail
-
+  private active = new Map<RefineTask, AbortController>()
+  private closed = false
+  private jobs = new Set<Promise<void>>()
   constructor(
-    getOptions: () => RefineOptions,
-    getLlm: () => LlmLike | undefined,
-    apply: RefineApply,
-    onFail?: RefineFail,
-  ) {
-    this.getOptions = getOptions
-    this.getLlm = getLlm
-    this.apply = apply
-    this.onFail = onFail
+    private getOptions: () => ThinkSummaryConfig,
+    private getLlm: () => LlmLike | undefined,
+    private apply: RefineApply,
+    private onFail?: RefineFail,
+  ) {}
+  private fail(task: RefineTask, reason: string) {
+    try { this.onFail?.(task.sessionId, task.thinkId, task.segmentIndex, reason) } catch {}
   }
-
-  /** 门控入队（读实时配置）：精炼开关开（段大小/代码跳过由调用方决定）。 */
   enqueue(task: RefineTask): boolean {
-    const o = this.getOptions()
-    if (o.enabled === false) return false
-    this.queue.push(task)
+    const o = resolveConfig(this.getOptions())
+    if (this.closed || !o.enabled || !o.refineEnabled || task.signal?.aborted) {
+      this.fail(task, '精炼已关闭或取消'); return false
+    }
+    if (this.queue.length >= 64) { this.fail(task, '精炼队列已满'); return false }
+    // Bound retained input even while waiting for a worker.
+    this.queue.push({ ...task, text: headTailTrim(task.text, o.refineMaxInputTokens) })
     this.pump()
     return true
   }
-
-  /** 并发水位：有空位就取出任务并行执行；任务结束让出空位并补位。 */
-  private pump(): void {
-    const cap = Math.max(1, this.getOptions().refineConcurrency ?? 3)
-    while (this.running < cap && this.queue.length > 0) {
-      const task = this.queue.shift()
-      if (!task) break
-      this.running++
-      void this.runOne(task).finally(() => {
-        this.running = Math.max(0, this.running - 1)
-        this.pump()
-      })
-    }
+  cancelAll(reason = '精炼已取消') {
+    for (const task of this.queue.splice(0)) this.fail(task, reason)
+    for (const controller of this.active.values()) controller.abort(new Error(reason))
   }
-
-  get pending(): number {
-    return this.queue.length
-  }
-
-  private async runOne(task: RefineTask): Promise<void> {
-    const o = this.getOptions()
-    const llm = this.getLlm()
-    if (!llm || typeof llm.stream !== 'function') {
-      // eslint-disable-next-line no-console
-      console.error('[dsh-think-summary] refine skipped: llm service unavailable', task.sessionId, task.thinkId, task.segmentIndex)
-      return // 启发式保留
-    }
-    try {
-      const model =
-        o.model && o.model !== 'auto'
-          ? o.model
-          : await resolveModel(llm, task.provider, task.fallbackModel)
-      // 超时兜底：任务卡死（llm 永不返回）时不占死并发位——超时放弃该任务
-      // 并释放空位，后续排队任务继续（否则并发位被卡死任务占满，排队的段永不精炼）
-      const timeoutMs = (o.refineTimeout ?? 60) * 1000
-      const res = await Promise.race([
-        this.runRefine(llm, task, model, o.maxInputTokens ?? 1500, o.outputTokens ?? 1024),
-        new Promise<never>((_, reject) => {
-          setTimeout(() => reject(new Error('refine timeout after ' + timeoutMs + 'ms')), timeoutMs)
-        }),
-      ])
-      if (res && res.text.length > 0) {
-        this.apply(task.sessionId, task.thinkId, task.segmentIndex, res.text, {
-          input: res.inputTokens,
-          output: estimateTokens(res.text),
-        })
-      }
-    } catch (error) {
-      // 错误隔离：任何异常只丢这次精炼，启发式摘要保留，不影响主请求与其他任务；
-      // 记录失败便于排查"未精炼"的段（含超时）
-      const reason = error instanceof Error ? error.message : String(error)
-      // eslint-disable-next-line no-console
-      console.error(
-        '[dsh-think-summary] refine failed:',
-        task.sessionId,
-        task.thinkId,
-        'seg',
-        task.segmentIndex,
-        reason,
-      )
-      this.onFail?.(task.sessionId, task.thinkId, task.segmentIndex, reason)
-    }
-  }
-
-  private async runRefine(
-    llm: LlmLike,
-    task: RefineTask,
-    model: string,
-    maxInputTokens: number,
-    outputTokens: number,
-  ): Promise<{ text: string; inputTokens: number }> {
-    // 探测确认（probe-notes.md §M3）：content 必须是内容块（字符串会被拒）；
-    // system 走顶层字段；该 provider 不支持 reasoningEffort（勿设置）。
-    const trimMode = this.getOptions().trim
-    const inputText =
-      trimMode === 'tail'
-        ? trimToTokens(task.text, maxInputTokens)
-        : trimMode === 'full'
-          ? task.text
-          : headTailTrim(task.text, maxInputTokens)
-    const stream = llm.stream({
-      provider: task.provider,
-      model,
-      maxTokens: outputTokens,
-      system: this.getOptions().refinePrompt ?? DEFAULT_REFINE_PROMPT,
-      messages: [
-        {
-          role: 'user',
-          content: [{ type: 'text', text: inputText }],
-        },
-      ],
+  cancelThink(sid: string, tid: string) {
+    this.queue = this.queue.filter(task => {
+      if (task.sessionId !== sid || task.thinkId !== tid) return true
+      this.fail(task, '精炼已取消'); return false
     })
-    let out = ''
-    for await (const chunk of stream) {
-      const c = chunk
-      if (c && c.type === 'text-delta' && typeof c.text === 'string') out += c.text
+    for (const [task, controller] of this.active) {
+      if (task.sessionId === sid && task.thinkId === tid) controller.abort(new Error('精炼已取消'))
     }
-    const trimmed = out.trim()
-    const text = trimmed.length > DISPLAY_MAX_CHARS ? trimmed.slice(0, DISPLAY_MAX_CHARS) + '…' : trimmed
-    return { text, inputTokens: estimateTokens(inputText) }
+  }
+  async dispose() { this.closed = true; this.cancelAll(); await Promise.allSettled(this.jobs) }
+  get pending() { return this.queue.length }
+  get running() { return this.active.size }
+  private pump() {
+    const o = resolveConfig(this.getOptions())
+    if (this.closed || !o.enabled || !o.refineEnabled) { this.cancelAll(); return }
+    const cap = Math.min(4, Math.max(1, Math.floor(o.refineConcurrency) || 1))
+    while (this.active.size < cap && this.queue.length) {
+      const task = this.queue.shift()!
+      const controller = new AbortController()
+      this.active.set(task, controller)
+      // Start outside the primary stream observer's synchronous stack.
+      const job = Promise.resolve().then(() => this.run(task, controller)).catch(() => {
+        this.fail(task, '精炼失败')
+      }).finally(() => { this.active.delete(task); this.jobs.delete(job); this.pump() }).catch(() => {})
+      this.jobs.add(job)
+    }
+  }
+  private async run(task: RefineTask, controller: AbortController) {
+    const o = resolveConfig(this.getOptions())
+    const signal = controller.signal
+    const abort = () => controller.abort(new Error('精炼已取消'))
+    task.signal?.addEventListener('abort', abort, { once: true })
+    if (task.signal?.aborted) abort()
+    const timer = setTimeout(() => controller.abort(new Error('精炼超时')), Math.max(1, o.refineTimeout * 1000))
+    let rejectAbort: (() => void) | undefined
+    try {
+      const cancelled = new Promise<never>((_, reject) => {
+        rejectAbort = () => reject(signal.reason)
+        signal.addEventListener('abort', rejectAbort, { once: true })
+        if (signal.aborted) rejectAbort()
+      })
+      const work = async () => {
+        signal.throwIfAborted()
+        const llm = this.getLlm()
+        if (!llm) throw new Error('unavailable')
+        // Context-window size is not model cost. Auto uses the known session model.
+        const model = o.refineModel === 'auto' ? task.fallbackModel : o.refineModel.trim()
+        if (!model || !task.provider || task.provider === 'unknown') throw new Error('unavailable')
+        let out = ''
+        for await (const chunk of llm.stream({
+          provider: task.provider, model, signal,
+          purpose: 'think-summary', maxTokens: o.refineOutputTokens,
+          system: DEFAULT_REFINE_PROMPT,
+          messages: [{ role: 'user', content: [{ type: 'text', text: task.text }] }],
+        })) {
+          signal.throwIfAborted()
+          if (chunk.type === 'finish' && chunk.reason.kind !== 'stop') throw new Error('provider-error')
+          if (chunk.type === 'text-delta' && typeof chunk.text === 'string') {
+            out = (out + chunk.text).slice(0, DISPLAY_MAX_CHARS)
+          }
+        }
+        if (!out.trim()) throw new Error('empty')
+        return out.trim()
+      }
+      const text = await Promise.race([work(), cancelled])
+      signal.throwIfAborted()
+      this.apply(task.sessionId, task.thinkId, task.segmentIndex, text, {
+        input: estimateTokens(task.text), output: estimateTokens(text),
+      })
+    } catch {
+      // Never persist provider errors: they can contain credentials or request contents.
+      this.fail(task, signal.aborted ? (signal.reason?.message === '精炼超时' ? '精炼超时' : '精炼已取消') : '精炼失败，保留原摘要')
+    } finally {
+      clearTimeout(timer)
+      task.signal?.removeEventListener('abort', abort)
+      if (rejectAbort) signal.removeEventListener('abort', rejectAbort)
+    }
   }
 }

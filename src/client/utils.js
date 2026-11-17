@@ -53,38 +53,61 @@ function segHeadLabel(s, prefix) {
  * 轮询会话思考状态（dock/views 共用）。
  * 每 1.5s fetch STATE_ROUTE；返回 { state, enabled, paused }。
  */
-function useThinkState(sessionId) {
-  const [state, setState] = React.useState(null)
-  const [enabled, setEnabled] = React.useState(true)
-  const [paused, setPaused] = React.useState(false)
-  React.useEffect(() => {
-    if (!sessionId) return undefined
-    let alive = true
-    let timer = null
-    const poll = async () => {
+// One polling subscription per session, shared by dock, history and all turn tails.
+const thinkSubscriptions = new Map()
+function subscribeThinkState(sessionId, listener) {
+  if (!sessionId) { listener({ state: null, enabled: true, paused: false }); return () => {} }
+  let entry = thinkSubscriptions.get(sessionId)
+  if (!entry) {
+    entry = { listeners: new Set(), value: { state: null, enabled: true, paused: false }, timer: null, controller: null, closed: false }
+    thinkSubscriptions.set(sessionId, entry)
+    entry.poll = async () => {
+      if (entry.closed || entry.controller || document.hidden) return
+      entry.controller = new AbortController()
+      const timeout = setTimeout(() => entry.controller?.abort(), 10000)
       try {
-        const res = await fetch(STATE_ROUTE + '?sessionId=' + encodeURIComponent(sessionId))
-        if (!res.ok) return
+        const res = await fetch(STATE_ROUTE + '?sessionId=' + encodeURIComponent(sessionId), { signal: entry.controller.signal })
+        if (!res.ok) throw new Error('state request failed')
         const json = await res.json()
-        if (!alive) return
-        setEnabled(!json || json.enabled !== false)
-        setPaused(!json || json.paused === true)
-        setState((json && json.state) || null)
-      } catch {
-        /* 轮询失败不影响 */
-      } finally {
-        if (!alive) return
-        timer = setTimeout(poll, 1500)
+        if (!entry.closed) {
+          entry.value = { state: json.state || null, enabled: json.enabled !== false, paused: json.paused === true }
+          for (const callback of entry.listeners) callback(entry.value)
+        }
+      } catch {} finally {
+        clearTimeout(timeout)
+        entry.controller = null
+        if (!entry.closed && !document.hidden) {
+          const state = entry.value.state
+          const pending = state?.thinks?.some(t => t.segments.some(s => !s.refined && !s.skipReason && !s.unrefinedReason))
+          entry.timer = setTimeout(entry.poll, state?.active || pending ? 1500 : 5000)
+        }
       }
     }
-    void poll()
-    return () => {
-      alive = false
-      if (timer !== null) clearTimeout(timer)
+    entry.visibility = () => {
+      clearTimeout(entry.timer)
+      entry.timer = null
+      if (document.hidden) entry.controller?.abort()
+      else void entry.poll()
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionId])
-  return { state, enabled, paused }
+    document.addEventListener('visibilitychange', entry.visibility)
+  }
+  entry.listeners.add(listener)
+  listener(entry.value)
+  if (!entry.timer) void entry.poll()
+  return () => {
+    entry.listeners.delete(listener)
+    if (entry.listeners.size) return
+    entry.closed = true
+    clearTimeout(entry.timer)
+    entry.controller?.abort()
+    document.removeEventListener('visibilitychange', entry.visibility)
+    thinkSubscriptions.delete(sessionId)
+  }
+}
+function useThinkState(sessionId) {
+  const [snapshot, setSnapshot] = React.useState({ sessionId, value: { state: null, enabled: true, paused: false } })
+  React.useEffect(() => subscribeThinkState(sessionId, value => setSnapshot({ sessionId, value })), [sessionId])
+  return snapshot.sessionId === sessionId ? snapshot.value : { state: null, enabled: true, paused: false }
 }
 
 /**

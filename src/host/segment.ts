@@ -125,9 +125,10 @@ export class Segmenter {
    * 忽略区的文本**不累计**到段缓冲/段 token，但返回值始终是真实计数——
    * 检测器据此计入总 token（长思考阈值/进度含代码量，见 docs/segment-optimization.md）。
    */
-  feed(text: string): RawCount {
+  feed(text: string, onCount?: (raw: RawCount) => void): RawCount {
     if (!text) return { cjk: 0, other: 0 }
     const raw = countRaw(text)
+    onCount?.(raw)
     this.pendingCjk += raw.cjk
     this.pendingOther += raw.other
     this.pending += text
@@ -140,6 +141,16 @@ export class Segmenter {
         this.pendingCjk -= lr.cjk
         this.pendingOther -= lr.other
         this.handleLine(line)
+        continue
+      }
+      // Hard memory ceiling also covers punctuation-free lines and ignored blocks.
+      if (this.pending.length > 65_536) {
+        const part = this.pending.slice(0, 65_536)
+        this.pending = this.pending.slice(65_536)
+        const count = countRaw(part)
+        this.pendingCjk -= count.cjk
+        this.pendingOther -= count.other
+        this.handleLine(part)
         continue
       }
       // 超长无换行行：估算 token 接近半个 max 时按句末标点拆出前部句子
@@ -258,8 +269,11 @@ export class Segmenter {
   }
 
   private append(line: string): void {
-    this.buf += line + '\n'
-    const r = countRaw(line)
+    const kept = line.slice(0, Math.max(0, 200_000 - this.buf.length - 1))
+    this.pendingIgnoreTokens += this.lineTokens(line.slice(kept.length))
+    if (!kept && this.buf.length >= 199_999) return
+    this.buf += kept + '\n'
+    const r = countRaw(kept)
     this.cjk += r.cjk
     this.other += r.other
   }
@@ -381,75 +395,12 @@ export class Segmenter {
 /**
  * 静态分段（事后兜底用）：对完整思考文本一次性切段。
  * 与流式共享同一套 Markdown 结构规则（代码块/表格原子，超限不切内部；
- * 内容已完整传入，"忽略"无意义，一律保留并带 meta 标记）。
+ * ignore/keep 与实时路径一致，末尾小段使用相同下限）。
  */
 export function segmentText(text: string, options: SegmentOptions = {}): SegmentPiece[] {
-  const min = options.segmentMinTokens ?? 1500
-  const max = options.segmentMaxTokens ?? 3000
   const out: SegmentPiece[] = []
-  let buf = ''
-  let cjk = 0
-  let other = 0
-  let inCode = false
-  let inTable = false
-  const tokens = () => Math.round(cjk + other / 4)
-  const cut = () => {
-    const t = buf.trim()
-    buf = ''
-    cjk = 0
-    other = 0
-    if (t) out.push({ text: t, tokens: estimateTokens(t), meta: analyzeMeta(t) })
-  }
-  for (const rawLine of text.split('\n')) {
-    if (inCode) {
-      if (FENCE_RE.test(rawLine)) {
-        inCode = false
-        buf += rawLine + '\n'
-        const r = countRaw(rawLine)
-        cjk += r.cjk
-        other += r.other
-        cut() // 代码段收尾（含闭合行）
-      } else {
-        buf += rawLine + '\n'
-        const r = countRaw(rawLine)
-        cjk += r.cjk
-        other += r.other
-      }
-      continue
-    }
-    const kind = classifyLine(rawLine, false)
-    if (kind.kind === 'fence-open') {
-      if (tokens() >= min && buf) cut() // 散文段收尾
-      buf += rawLine + '\n'
-      const r = countRaw(rawLine)
-      cjk += r.cjk
-      other += r.other
-      inCode = true
-      continue
-    }
-    if (kind.kind === 'table' || kind.kind === 'table-sep') {
-      if (!inTable) {
-        if (tokens() >= min && buf) cut() // 散文段收尾
-        inTable = true
-      }
-      buf += rawLine + '\n'
-      const r = countRaw(rawLine)
-      cjk += r.cjk
-      other += r.other
-      continue
-    }
-    if (inTable) {
-      // 表格结束：表格段收尾（切在行前）
-      if (kind.kind !== 'blank' && tokens() >= min) cut()
-      inTable = false
-    }
-    if (tokens() >= min && isBoundaryLine(kind.kind, rawLine)) cut() // 边界切在行前
-    buf += rawLine + '\n'
-    const r = countRaw(rawLine)
-    cjk += r.cjk
-    other += r.other
-    if (tokens() >= max) cut()
-  }
-  cut()
+  const segmenter = new Segmenter(options, (text, tokens, meta) => out.push({ text, tokens, meta }))
+  segmenter.feed(text)
+  segmenter.flush()
   return out
 }

@@ -14,20 +14,12 @@ export const inject = ['slots']
 
 export function apply(ctx) {
   try {
-    // 1) 设置卡片（官方插件配置区，直连自建设置桥）。
-    //    rc.7 起 settings.plugin.item 是 keyed 槽位：注册必须传 key（= 设置命名空间），
-    //    旧的 id/order/label 写法会在声明时抛 keyed slot requires options.key。
-    const scope = createBridgeScope()
-    ctx.slots.inject('settings.plugin.item', () => ctx.slots.register(
-      { name: 'settings.plugin.item', key: 'think-summary' },
-      makeSettingsCard(scope),
-    ))
     // 2) 聊天流内：turn 末尾的思考总结条（turn 级槽位，显示该 turn 全部思考分组）
     //    select 返回值成为组件的 matched prop：传 TurnLocation 对象 + seq
     ctx.slots.inject('conversation.chat.turnTail', () => ctx.slots.register(
       {
         name: 'conversation.chat.turnTail',
-        select: (owner) => (owner && owner.turn && typeof owner.turn.turn === 'number' ? { turn: owner.turn, seq: owner.seq } : null),
+        id: 'think-summary.tail',
       },
       makeThinkTail(),
     ))
@@ -36,7 +28,7 @@ export function apply(ctx) {
       { name: 'conversation.view', id: 'think-summary', order: 20, label: '思考总结' },
       makeThinkSummaryView(),
     ))
-    // 4) 输入框上方实时面板（配合输入框样式；只显示当前思考，且仅在"对话"视图）
+    // 4) 输入框上方实时面板（当前思考与上次摘要）
     ctx.slots.inject('conversation.input.dock', () => ctx.slots.register(
       { name: 'conversation.input.dock', id: 'think-summary.dock', order: 1 },
       makeInputDock(),
@@ -47,6 +39,7 @@ export function apply(ctx) {
       style.dataset.dshThinksummaryCss = ''
       style.textContent = PANEL_CSS
       document.head.appendChild(style)
+      ctx.effect(() => () => style.remove())
     }
   } catch (error) {
     // web shell 会因 apply 抛错而启动失败：外部插件必须吞掉

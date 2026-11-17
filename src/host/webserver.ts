@@ -1,72 +1,90 @@
+import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { CtxLike } from './ctx.js'
+export type RouteReq = IncomingMessage
+export type RouteRes = ServerResponse
+interface WebRoute { kind: 'exact'; path: string; handler: (req: RouteReq, res: RouteRes) => unknown }
 
-/**
- * webServer 服务可能晚于插件 apply 挂载（bundle 加载顺序），
- * 路由注册必须响应式：先试一次，未就绪则监听 `internal/service`
- * 在 webServer 出现时补注册。回调在服务就绪后恰好执行一次。
- */
-export function whenWebServer(ctx: CtxLike, register: (webServer: { register: (route: unknown) => unknown }) => void): void {
-  let done = false
-  const tryRegister = () => {
-    if (done) return
-    const webServer = ctx.get('webServer') as
-      | { register: (route: unknown) => unknown }
-      | undefined
-    if (!webServer || typeof webServer.register !== 'function') return
+/** Re-register on service replacement; unregister on plugin unload. */
+export function whenWebServer(ctx: CtxLike, register: (server: { register(route: WebRoute): unknown }) => void) {
+  let current: unknown
+  let disposers: (() => void)[] = []
+  const clear = () => { for (const dispose of disposers.splice(0)) { try { dispose() } catch {} }; current = undefined }
+  const attempt = () => {
+    const server = ctx.get('webServer') as { register(route: WebRoute): unknown } | undefined
+    if (server === current) return
+    clear()
+    if (!server) return
     try {
-      register(webServer)
-      done = true
-    } catch {
-      /* 注册失败不致命：下次服务事件再试 */
-    }
+      register({ register(route) {
+        const handler = route.handler
+        const result = server.register({ ...route, handler: async (req, res) => {
+          try { await handler(req, res) } catch (error) {
+            if (!res.headersSent) writeJson(res, error instanceof HttpError ? error.status : 500, { ok: false, error: error instanceof HttpError ? error.message : 'internal error' })
+          }
+        } })
+        if (typeof result === 'function') disposers.push(result as () => void)
+        return result
+      } })
+      current = server
+    } catch { clear() }
   }
-  tryRegister()
-  ctx.on('internal/service', (name: unknown) => {
-    if (name === 'webServer') tryRegister()
-  })
+  attempt()
+  ctx.on('internal/service', (name: string) => { if (name === 'webServer') attempt() })
+  ctx.effect(() => clear)
 }
-
-/** 最小路由请求/响应结构面（与 dsh-web-server 的 WebRoute 对齐）。 */
-export interface RouteReq {
-  method?: string
-  url?: string
-  socket?: { remoteAddress?: string }
-}
-
-export interface RouteRes {
-  writeHead: (status: number, headers: Record<string, string>) => void
-  end: (body: string) => void
-}
-
-export function writeJson(res: RouteRes, status: number, body: unknown): void {
-  res.writeHead(status, { 'content-type': 'application/json' })
+export function writeJson(res: RouteRes, status: number, body: unknown) {
+  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' })
   res.end(JSON.stringify(body))
 }
-
-/** 读取请求体 JSON（dsh-web-server handler 收到原始 IncomingMessage）。 */
-export async function readJsonBody<T = Record<string, unknown>>(req: RouteReq): Promise<T | null> {
-  const raw = req as RouteReq & { on?: (ev: string, cb: (chunk?: unknown) => void) => unknown }
-  if (typeof raw.on !== 'function') return null
-  let body = ''
-  await new Promise<void>((resolve, reject) => {
-    raw.on?.('data', (chunk: unknown) => {
-      if (typeof chunk === 'string') body += chunk
-      else if (chunk && typeof (chunk as { toString?: (enc?: string) => string }).toString === 'function') {
-        body += (chunk as { toString: (enc?: string) => string }).toString('utf8')
-      }
-    })
-    raw.on?.('end', () => resolve())
-    raw.on?.('error', () => reject(new Error('body read failed')))
-  })
-  try {
-    return JSON.parse(body) as T
-  } catch {
-    return null
-  }
+export class HttpError extends Error { constructor(public status: number, message: string) { super(message) } }
+function loopback(address: string | undefined) {
+  return address === '::1' || /^(::ffff:)?127\.\d+\.\d+\.\d+$/.test(address ?? '')
 }
-
-/** loopback 守卫：拒绝非本机来源（浏览器同源 + 远程浏览器无持久化设置）。 */
-export function isLoopback(req: RouteReq): boolean {
-  const addr = req.socket?.remoteAddress
-  return addr === undefined || addr === '127.0.0.1' || addr === '::1' || addr === '::ffff:127.0.0.1'
+/** Local-only surface: validate socket, Host and browser origin (DNS rebinding/CSRF). */
+export function guard(req: RouteReq, res: RouteRes, method: 'GET' | 'POST'): boolean {
+  if (req.method !== method) { writeJson(res, 405, { error: 'method not allowed' }); return false }
+  let valid = loopback(req.socket?.remoteAddress)
+  try {
+    const host = new URL(`http://${req.headers.host}`)
+    valid &&= host.hostname === 'localhost' || host.hostname === '[::1]' || loopback(host.hostname)
+    const origin = req.headers.origin
+    if (origin !== undefined) {
+      const parsed = new URL(origin)
+      valid &&= parsed.host === host.host && parsed.protocol === (('encrypted' in req.socket && req.socket.encrypted) ? 'https:' : 'http:')
+    }
+    valid &&= req.headers['sec-fetch-site'] !== 'cross-site'
+  } catch { valid = false }
+  if (!valid) { writeJson(res, 403, { error: 'forbidden' }); return false }
+  if (method === 'POST' && req.headers['content-type']?.split(';')[0]?.trim() !== 'application/json') {
+    writeJson(res, 415, { error: 'application/json required' }); return false
+  }
+  return true
+}
+export async function readJsonBody<T>(req: RouteReq): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = []
+    let size = 0
+    const cleanup = () => {
+      clearTimeout(timer)
+      req.off('data', data); req.off('end', end); req.off('error', error); req.off('aborted', aborted)
+    }
+    const fail = (err: Error) => { cleanup(); req.resume(); reject(err) }
+    const data = (chunk: Buffer) => {
+      size += chunk.length
+      if (size > 16_384) return fail(new HttpError(413, 'body too large'))
+      chunks.push(Buffer.from(chunk))
+    }
+    const end = () => {
+      cleanup()
+      try {
+        const value = JSON.parse(Buffer.concat(chunks).toString('utf8'))
+        if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error()
+        resolve(value)
+      } catch { reject(new HttpError(400, 'invalid JSON object')) }
+    }
+    const error = () => fail(new HttpError(400, 'body read failed'))
+    const aborted = () => fail(new HttpError(400, 'request aborted'))
+    const timer = setTimeout(() => fail(new HttpError(408, 'body timeout')), 5000)
+    req.on('data', data); req.on('end', end); req.on('error', error); req.on('aborted', aborted)
+  })
 }

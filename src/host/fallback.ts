@@ -1,188 +1,57 @@
 import type { ThinkStateStore } from './state.js'
 import { estimateTokens } from './detect.js'
-import { MIN_SEGMENT_FLOOR } from './segment.js'
 import { processThinking, decideRefine } from './summarize/pipeline.js'
 import type { RefineQueue } from './summarize/refine.js'
 import type { ThinkSummaryConfig } from './config.js'
 import type { CtxLike } from './ctx.js'
 
-/**
- * M2 事后兜底路径（design.md §4.3.3，v2）：
- *  - assistant/chunk 事件按 sessionId+turn+step 累积 reasoning-delta 文本
- *  - assistant/message（每步终态）时，若实时路径未产出（断流/异常/错过），
- *    对该步文本补跑分段+启发式总结，**追加**进"该 turn 的 think"；
- *    **兜底路径的分段同样入队精炼**（补齐精炼全链路）
- *  - 精炼模型来源：会话默认模型（agentDefaultModel.currentSelection()），
- *    实时请求的 provider 在兜底事件里不可得
- *  - 缓冲按年龄清理；全程 try/catch，绝不冒泡；配置经 getOptions 读取
- */
-interface BufEntry {
-  text: string
-  ts: number
-}
-
-const BUF_CAP_CHARS = 200_000
-const BUF_TTL_MS = 10 * 60 * 1000
-
-export interface DefaultModel {
-  provider: string
-  model: string
-}
-
-export function installFallback(
-  ctx: CtxLike,
-  store: ThinkStateStore,
-  getOptions: () => ThinkSummaryConfig,
-  refine?: RefineQueue | null,
-  defaultModel?: () => DefaultModel,
-) {
-  const buf = new Map<string, BufEntry>()
-
-  const sweepBuf = () => {
-    const now = Date.now()
-    for (const [k, e] of buf) if (now - e.ts > BUF_TTL_MS) buf.delete(k)
-  }
-
-  // 定时清理（timer 服务；无 timer 时兜底路径仍工作，只是不清理）
-  const timer = ctx.get('timer') as { interval?: (fn: () => void, ms: number) => unknown } | undefined
-  timer?.interval?.(() => {
-    store.sweep()
-    sweepBuf()
-  }, 60_000)
-
+/** rc.3 terminal messages already contain reasoning; don't duplicate the live stream in a buffer. */
+export function installFallback(ctx: CtxLike, store: ThinkStateStore, getOptions: () => ThinkSummaryConfig, refine?: RefineQueue | null) {
   ctx.on('session/event', (session, event) => {
     try {
+      const sid = session?.id
+      const data = event?.data
+      if (typeof sid !== 'string' || !data || !['assistant/chunk', 'assistant/message'].includes(event.type)) return
+      const { turn, step } = data
+      if (!Number.isInteger(turn) || !Number.isInteger(step)) return
+      const state = store.get(sid)
+      const realtime = state?.thinks.slice().reverse().find(t => t.id.startsWith('s') && t.turn === undefined)
+      if (realtime) { realtime.turn = turn; realtime.step = step; store.touch(sid) }
+      if (event.type !== 'assistant/message') return
+      store.sweep()
       const opts = getOptions()
-      if (opts.enabled === false) return
-      const threshold = opts.thinkThresholdTokens ?? 2000
-      const e = event as {
-        type?: string
-        data?: { turn?: number; step?: number; chunk?: { type?: string; text?: string } }
+      if (opts.enabled === false || store.paused) return
+      if (state?.thinks.some(t => t.turn === turn && t.step === step && t.segments.length)) return
+      const blocks = data.message?.content
+      if (!Array.isArray(blocks)) return
+      let text = ''
+      for (const block of blocks) {
+        if (block?.type === 'reasoning' && typeof block.text === 'string') text += block.text.slice(0, 200_000 - text.length)
+        if (text.length >= 200_000) break
       }
-      if (!e || !e.data) return
-      const sid =
-        session && typeof (session as { id?: unknown }).id === 'string' ? ((session as { id: string }).id) : undefined
-      if (!sid) return
-      const turn = e.data.turn ?? 0
-      const step = e.data.step ?? 0
-
-      /**
-       * 给实时路径（s 开头）的最新未打标 think 打 (turn, step) 标记，
-       * 供聊天流内 turnTail 按 turn 匹配。幂等：已打标/无未打标则跳过。
-       * 在 assistant/chunk（流进行中）与 assistant/message（流结束）都调用，
-       * 双保险——事件流偶发缺失时任一触发即可打标。
-       * 打标是元数据，暂停时也执行（暂停只停止新总结产出）。
-       */
-      const tagRealtimeThink = () => {
-        const s = store.get(sid)
-        if (!s) return
-        for (let i = s.thinks.length - 1; i >= 0; i--) {
-          const t = s.thinks[i]
-          if (t && t.id.startsWith('s') && t.turn === undefined) {
-            t.turn = turn
-            t.step = step
-            break
-          }
-        }
+      if (estimateTokens(text) < (opts.thinkThresholdTokens ?? 2000)) return
+      const outcomes = processThinking(text, {
+        segmentMinTokens: opts.segmentMinTokens, segmentMaxTokens: opts.segmentMaxTokens,
+        codeMode: opts.codeBlockMode === 'ignore' ? 'ignore' : 'keep',
+        tableMode: opts.tableMode === 'ignore' ? 'ignore' : 'keep',
+      }, { skipCode: opts.codeBlockMode !== 'keep-refine', skipTable: opts.tableMode !== 'keep-refine' })
+      if (!outcomes.length) return
+      const { state: target, think } = store.ensureThink(sid, `t${turn}_${step}`)
+      think.turn = turn; think.step = step
+      const source = data.message?.source
+      for (const [i, outcome] of outcomes.entries()) {
+        const index = think.segments.length
+        const decision = decideRefine(opts, outcome.tokens, i === outcomes.length - 1)
+        store.pushSegment(target, think.id, { index, summary: outcome.summary, tokens: outcome.tokens,
+          refined: false, skipReason: outcome.skipReason, unrefinedReason: decision.unrefinedReason, ts: outcome.ts })
+        if (refine && !outcome.skipReason && !decision.tooSmall) refine.enqueue({
+          sessionId: sid, thinkId: think.id, segmentIndex: index, text: outcome.text,
+          provider: source?.provider ?? '', fallbackModel: source?.model ?? '',
+        })
       }
-
-      if (e.type === 'assistant/chunk') {
-        // 流进行中：先打标（不依赖 assistant/message 是否到达）
-        tagRealtimeThink()
-        // 暂停时停止累积：不再有新总结产出
-        if (store.paused) return
-        const chunk = e.data.chunk
-        if (chunk && chunk.type === 'reasoning-delta' && typeof chunk.text === 'string' && chunk.text.length > 0) {
-          const k = `${sid}:${turn}:${step}`
-          const prev = buf.get(k)
-          if (prev && prev.text.length > BUF_CAP_CHARS) return
-          buf.set(k, { text: (prev?.text ?? '') + chunk.text, ts: Date.now() })
-        }
-        return
-      }
-      if (e.type === 'assistant/message') {
-        const k = `${sid}:${turn}:${step}`
-        const entry = buf.get(k)
-        buf.delete(k)
-        // 兜底 think 按 (turn, step) 隔离：同一 turn 的多个 step（如思考→工具调用→再思考）
-        // 各自独立成 think，不再合并（修复"已结束的 think 被认为是同一个"）
-        const thinkKey = `t${turn}_${step}`
-        const { state, think } = store.ensureThink(sid, thinkKey)
-        think.turn = turn
-        think.step = step
-        // 给最新已结束的实时 think 打 (turn, step) 标记（供聊天流内 turnTail 匹配）。
-        // 从后往前找"最后一个 s 开头、未打标"的 think（该步 llm/stream 刚结束；
-        // 不检查 active——assistant/message 事件可能先于流收尾的 endThink 到达，
-        // 依赖 active 会漏打标或把标打到错误的 step 上）。
-        // 打标是元数据，暂停时也执行——否则暂停期间结束的思考失去 turn 标记，
-        // 聊天流内总结条（turnTail 按 turn 匹配）将永远显示不出来
-        tagRealtimeThink()
-        // 暂停：不补跑分段总结（旧总结照常显示），但上面的打标已执行
-        if (store.paused) return
-        if (!entry || entry.text.length === 0) return
-        // 与实时一致：未达长思考阈值（短思考，如工具调用间的几十 token 思考）
-        // 不产出段——实时路径由 inSplice 门控不出段，兜底也必须一致，
-        // 否则连续短思考会产生一连串几十 token 的小段
-        if (estimateTokens(entry.text) < threshold) return
-        // 同 (turn, step) 的实时 think 已产出分段则跳过兜底（防同一思考两套总结）
-        const realtimeHasSegs = state.thinks.some(
-          (t) => t.id.startsWith('s') && t.turn === turn && t.step === step && t.segments && t.segments.length > 0,
-        )
-        if (realtimeHasSegs || (state.inSplice && think.segments.length > 0)) return
-        const outcomes = processThinking(
-          entry.text,
-          {
-            segmentMinTokens: opts.segmentMinTokens,
-            segmentMaxTokens: opts.segmentMaxTokens,
-          },
-          {
-            // ignore / keep-skip 都不精炼代码/表格段（keep-refine 才精炼）；
-            // 兜底路径处理完整文本，无法"不写内存"，但保持与流式一致的精炼决策
-            skipCode: opts.codeBlockMode !== 'keep-refine',
-            skipTable: opts.tableMode !== 'keep-refine',
-          },
-        )
-        if (outcomes.length === 0) return
-        const model = defaultModel?.() ?? { provider: '', model: '' }
-        const base = think.segments.length
-        for (const o of outcomes) {
-          // ignore 模式：代码块/表格段不显示（与流式一致——总结卡片无痕迹）
-          if (o.skipReason === 'code' && opts.codeBlockMode === 'ignore') continue
-          if (o.skipReason === 'table' && opts.tableMode === 'ignore') continue
-          // 微尾段（低于 flush 下限）不产出
-          if (o.tokens < MIN_SEGMENT_FLOOR) continue
-          const idx = base + o.index
-          // 精炼决策（实时/兜底共用口径）：末尾段即使 < min 也精炼；非末尾小段不精炼记原因
-          const dec = decideRefine(opts, o.tokens, o.index === outcomes.length - 1)
-          store.pushSegment(state, thinkKey, {
-            index: idx,
-            summary: o.summary,
-            tokens: o.tokens,
-            refined: false,
-            skipReason: o.skipReason,
-            unrefinedReason:
-              refine && !o.skipReason && dec.tooSmall ? dec.unrefinedReason : undefined,
-            ts: o.ts,
-          })
-          // 兜底路径分段同样精炼（若默认模型可解析）；代码段/表格段按配置跳过
-          if (refine && !o.skipReason && !dec.tooSmall) {
-            refine.enqueue({
-              sessionId: sid,
-              thinkId: thinkKey,
-              segmentIndex: idx,
-              text: o.text,
-              provider: model.provider || 'unknown',
-              fallbackModel: model.model || '',
-            })
-          }
-        }
-        think.tokens += estimateTokens(entry.text)
-        state.thinkingTokens = think.tokens
-        if (state.thinkingTokens >= threshold) state.inSplice = true
-        state.updatedAt = Date.now()
-      }
-    } catch {
-      /* 兜底失败仅影响本段，不影响会话。 */
-    }
+      think.tokens = estimateTokens(text)
+      target.thinkingTokens = think.tokens
+      store.touch(sid)
+    } catch { /* fallback observers never interfere with the session */ }
   })
 }
