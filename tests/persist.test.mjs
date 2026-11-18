@@ -55,9 +55,10 @@ test('malformed records are isolated and never replace live state; listeners are
   const store = new ThinkStateStore()
   store.onChange(() => { throw new Error('disk') })
   let called = 0; store.onChange(() => called++)
-  store.beginThink('live')
+  const { think } = store.beginThink('live')
   store.loadAll([{ sessionId: 'bad', thinks: [null, {}] }, { sessionId: 'live', thinks: [{ id: 's9', segments: [{ index: 0, summary: 'old' }] }] }])
-  assert.equal(store.get('live').thinks[0].id, 's1')
+  assert.equal(store.get('live').thinks[0].segments[0].summary, 'old')
+  assert.equal(store.get('live').thinks[1], think)
   assert.equal(called, 1)
 })
 
@@ -67,4 +68,45 @@ test('reload settles unfinished refinement instead of displaying pending forever
   store.loadAll([{ sessionId: 's', nextThinkId: 1, thinks: [{ id: 's9', active: true, segments: [{ index: 0, summary: '提取摘要', refined: false }] }] }])
   assert.ok(store.get('s').thinks[0].segments[0].unrefinedReason)
   assert.equal(store.beginThink('s').think.id, 's10')
+})
+
+test('enabling persistence merges history before any concurrent flush, retaining active IDs', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'think-enable-'))
+  const previous = process.env.DSH_HOME
+  process.env.DSH_HOME = dir
+  t.after(() => {
+    if (previous === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previous
+  })
+  const file = join(dir, 'dsh-think-summary.json')
+  const historical = new ThinkStateStore()
+  for (const id of ['archive', 'active']) {
+    const { state, think } = historical.beginThink(id)
+    historical.pushSegment(state, think.id, { index: 0, summary: 'old', tokens: 1, refined: true, ts: 1 })
+  }
+  await writeFile(file, JSON.stringify({ version: 1, sessions: historical.exportAll() }))
+  const ctx = context(), store = new ThinkStateStore(), config = { persistEnabled: false }
+  const writer = await installPersist(ctx, store, () => config)
+  assert.equal(store.get('archive'), undefined)
+  const { state, think } = store.beginThink('active')
+  config.persistEnabled = true
+  const enabling = ctx.emit('loader/volatile-update')
+  store.beginThink('empty')
+  await Promise.all([enabling, writer.flush()])
+  assert.deepEqual(JSON.parse(await readFile(file)).sessions.map(s => s.sessionId).sort(), ['active', 'archive'])
+  assert.equal(store.get('active'), state)
+  assert.equal(state.active, true)
+  store.pushSegment(state, think.id, { index: 0, summary: 'new', tokens: 2, refined: false, ts: 2 })
+  store.updateSegment('active', think.id, 0, { summary: 'refined', refined: true })
+  config.persistEnabled = false
+  await ctx.emit('loader/volatile-update')
+  config.persistEnabled = true
+  await ctx.emit('loader/volatile-update')
+  await ctx.emit('dispose')
+  const restored = new ThinkStateStore()
+  restored.loadAll(JSON.parse(await readFile(file)).sessions)
+  const groups = restored.get('active').thinks
+  assert.deepEqual(groups.map(g => g.segments[0].summary), ['old', 'refined'])
+  assert.equal(groups[1].id, think.id)
+  assert.equal(new Set([...groups, restored.beginThink('active').think].map(g => g.id)).size, 3)
 })

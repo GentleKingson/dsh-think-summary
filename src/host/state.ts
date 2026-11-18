@@ -73,6 +73,10 @@ export class ThinkStateStore {
   /** 状态变更监听（持久化写盘用）。 */
   private listeners = new Set<() => void>()
 
+  // GenerateOptions only carries the session ID. The next assistant event binds
+  // a skipped primary request to its turn and step, even after a resume.
+  readonly untaggedPausedRequests = new Set<string>()
+
   /**
    * 全局暂停（客户端标题栏"暂停"按钮，非设置项）：
    * 暂停后不再检测/分段/精炼/兜底任何新思考，旧总结照常显示；
@@ -246,12 +250,14 @@ export class ThinkStateStore {
       if (!rec || typeof rec.sessionId !== 'string' || !Array.isArray(rec.thinks)) continue
       const hasSegs = rec.thinks.some((t) => t && Array.isArray(t.segments) && t.segments.length > 0)
       if (!hasSegs) continue // 只恢复有输出的总结
-      if (this.map.has(rec.sessionId)) continue
-      const s = this.create(rec.sessionId)
-      s.thinkingTokens = typeof rec.thinkingTokens === 'number' ? rec.thinkingTokens : 0
-      s.updatedAt = typeof rec.updatedAt === 'number' ? rec.updatedAt : Date.now()
-      s.nextThinkId = typeof rec.nextThinkId === 'number' && rec.nextThinkId > 0 ? rec.nextThinkId : 1
-      s.thinks = rec.thinks
+      const live = this.get(rec.sessionId)
+      const s = live ?? this.create(rec.sessionId)
+      if (!live) {
+        s.thinkingTokens = typeof rec.thinkingTokens === 'number' ? rec.thinkingTokens : 0
+        s.updatedAt = typeof rec.updatedAt === 'number' ? rec.updatedAt : Date.now()
+      }
+      if (Number.isSafeInteger(rec.nextThinkId)) s.nextThinkId = Math.max(s.nextThinkId, rec.nextThinkId)
+      const restored: ThinkGroup[] = rec.thinks
         .filter((t) => t && Array.isArray(t.segments))
         .map((t) => ({
           id: String(t.id),
@@ -262,7 +268,17 @@ export class ThinkStateStore {
           step: typeof t.step === 'number' ? t.step : undefined,
           segments: t.segments.filter(seg => seg && typeof seg.summary === 'string' && Number.isInteger(seg.index)).map(seg => ({ ...seg, unrefinedReason: !seg.refined && !seg.skipReason && !seg.unrefinedReason && seg.kind !== 'self' ? '上次运行已结束，保留原摘要' : seg.unrefinedReason })),
         }))
-      s.nextThinkId = Math.max(s.nextThinkId, ...s.thinks.map(t => /^s\d+$/.test(t.id) ? Number(t.id.slice(1)) + 1 : 1))
+      const used = new Set(s.thinks.map(t => t.id))
+      for (const t of restored) {
+        const serial = /^s\d+$/.test(t.id) ? Number(t.id.slice(1)) : 0
+        if (Number.isSafeInteger(serial)) s.nextThinkId = Math.max(s.nextThinkId, serial + 1)
+      }
+      for (const t of restored) {
+        // Queued refinements and stream closures already reference the live IDs.
+        if (used.has(t.id)) t.id = `s${s.nextThinkId++}`
+        used.add(t.id)
+      }
+      s.thinks = restored.concat(s.thinks)
     }
   }
 

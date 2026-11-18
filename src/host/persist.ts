@@ -14,38 +14,56 @@ export async function installPersist(ctx: CtxLike, store: ThinkStateStore, getOp
   let timer: ReturnType<typeof setTimeout> | undefined
   let writing: Promise<void> | undefined
   let stopped = false
-  if (getOptions().persistEnabled !== false) {
-    try {
-      const saved = JSON.parse(await readFile(file, 'utf8'))
-      if (saved.version === 1) store.loadAll(saved.sessions)
-    } catch { /* Missing/corrupt data cannot stop the host. */ }
-  }
-  const flush = async (): Promise<void> => {
-    if (timer) clearTimeout(timer)
-    timer = undefined
-    if (writing) { await writing; if (dirty) await flush(); return }
-    if (!dirty || getOptions().persistEnabled === false) { dirty = false; return }
-    dirty = false
-    const tmp = `${file}.${randomUUID()}.tmp`
-    const payload = JSON.stringify({ version: 1, sessions: store.exportAll() })
-    writing = (async () => {
+  let loaded = false
+  const enabled = () => getOptions().persistEnabled !== false
+
+  const save = async () => {
+    if (!loaded) {
       try {
+        const saved = JSON.parse(await readFile(file, 'utf8'))
+        if (!enabled()) return
+        if (saved?.version !== 1 || !Array.isArray(saved.sessions)) throw new Error('Unknown history format')
+        store.loadAll(saved.sessions)
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+          console.warn('[dsh-think-summary] history load failed; preserving existing file')
+          return
+        }
+      }
+      loaded = true
+    }
+    while (dirty && enabled()) {
+      dirty = false
+      const tmp = `${file}.${randomUUID()}.tmp`
+      try {
+        const payload = JSON.stringify({ version: 1, sessions: store.exportAll() })
         await mkdir(dir, { recursive: true })
         await writeFile(tmp, payload, { encoding: 'utf8', mode: 0o600, flag: 'wx' })
+        if (!enabled()) { dirty = true; return }
         await rename(tmp, file)
       } catch {
         dirty = true
         console.warn('[dsh-think-summary] history save failed; will retry on next change')
+        return
       } finally { await unlink(tmp).catch(() => {}) }
-    })()
-    await writing
-    writing = undefined
+    }
   }
+
+  const flush = async (): Promise<void> => {
+    clearTimeout(timer)
+    timer = undefined
+    if (writing) await writing
+    if (!enabled() || (loaded && !dirty)) return
+    writing ??= save().finally(() => { writing = undefined })
+    await writing
+  }
+  await flush()
   const unsubscribe = store.onChange(() => {
-    if (stopped || getOptions().persistEnabled === false) return
+    if (stopped) return
     dirty = true
-    if (!timer) timer = setTimeout(() => { void flush().catch(() => {}) }, 250)
+    if (enabled() && !timer) timer = setTimeout(() => { void flush().catch(() => {}) }, 250)
   })
+  ctx.on('loader/volatile-update', () => { if (!stopped) return flush() })
   ctx.effect(() => async () => {
     stopped = true
     unsubscribe()

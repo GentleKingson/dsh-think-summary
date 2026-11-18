@@ -90,3 +90,70 @@ test('short retained code does not bypass the long-thinking threshold', async ()
   await collect(wrap({ sessionId: 's' }, () => (async function*() { yield short })()))
   assert.equal(store.get('s').thinks[0].segments.length, 0)
 })
+
+test('fallback excludes paused steps across resume, terminal replay and interleaved sessions', async () => {
+  const ctx = context(), store = new ThinkStateStore(), tasks = []
+  const refine = { enqueue: task => tasks.push(task) }
+  installDetect(ctx, store, options, refine)
+  installFallback(ctx, store, options, refine)
+  const send = (sid, type, step, text) => ctx.emit('session/event', { id: sid }, {
+    type, data: { turn: 1, step, message: { content: [{ type: 'reasoning', text }] } },
+  })
+  const secret = '暂停内容'.repeat(100), allowed = '正常内容'.repeat(100)
+  await send('active', 'step/start', 1)
+  store.paused = true
+  await send('paused', 'step/start', 1)
+  await send('chunk-only', 'assistant/chunk', 1)
+  const wrap = ctx.events.get('llm/stream')[0]
+  await collect(wrap({ sessionId: 'stream-only' }, () => (async function* () {
+    yield { type: 'reasoning-delta', text: secret }
+  })()))
+  store.paused = false
+  for (const sid of ['active', 'paused', 'chunk-only', 'stream-only']) {
+    await send(sid, 'assistant/message', 1, secret)
+    await send(sid, 'step/end', 1)
+    await send(sid, 'assistant/message', 1, secret)
+    assert.equal(store.get(sid), undefined)
+  }
+  assert.equal(tasks.length, 0)
+  await send('other', 'assistant/message', 1, allowed)
+  await send('paused', 'step/start', 2)
+  await send('paused', 'assistant/message', 2, allowed)
+  assert.deepEqual(tasks.map(t => t.sessionId), ['other', 'paused'])
+})
+
+for (const mode of ['keep-skip', 'keep-refine']) {
+  test(mode + ' emits earlier closed fences in order when a later delta crosses the threshold', async () => {
+    const ctx = context(), store = new ThinkStateStore(), tasks = []
+    installDetect(ctx, store, () => ({ ...options(), codeBlockMode: mode, thinkThresholdTokens: 500 }),
+      { enqueue: task => tasks.push(task) })
+    const wrap = ctx.events.get('llm/stream')[0]
+    const fences = ['first', 'second'].map(name => '```js\n' + name.repeat(100) + '\n```')
+    const prose = '正常正文'.repeat(150)
+    await collect(wrap({ sessionId: 's' }, () => (async function* () {
+      for (const text of fences) yield { type: 'reasoning-delta', text: text + '\n' }
+      assert.equal(store.get('s').thinks[0].segments.length, 0)
+      yield { type: 'reasoning-delta', text: prose }
+    })()))
+    const segments = store.get('s').thinks[0].segments
+    assert.deepEqual(segments.map(s => s.index), [0, 1, 2])
+    assert.match(segments[0].summary, /first/)
+    assert.match(segments[1].summary, /second/)
+    assert.deepEqual(tasks.map(t => t.text), mode === 'keep-refine' ? [...fences, prose] : [prose])
+  })
+}
+
+test('ignored table cell spanning several slices never reaches refinement', async () => {
+  const ctx = context(), store = new ThinkStateStore(), tasks = []
+  installDetect(ctx, store, options, { enqueue: task => tasks.push(task) })
+  const wrap = ctx.events.get('llm/stream')[0]
+  const prose = '表格之后的正文'.repeat(80)
+  await collect(wrap({ sessionId: 's' }, () => (async function* () {
+    yield { type: 'reasoning-delta', text: '| field | value |\n|--|--|\n| hidden | ' }
+    for (let i = 0; i < 20; i++) yield { type: 'reasoning-delta', text: 'secret!'.repeat(1_500) }
+    yield { type: 'reasoning-delta', text: '\n' + prose }
+  })()))
+  assert.deepEqual(tasks.map(t => t.text), [prose])
+  const [segment] = store.get('s').thinks[0].segments
+  assert.ok(segment.rawTokens > 50_000)
+})

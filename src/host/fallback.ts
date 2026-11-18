@@ -7,20 +7,51 @@ import type { CtxLike } from './ctx.js'
 
 /** rc.3 terminal messages already contain reasoning; don't duplicate the live stream in a buffer. */
 export function installFallback(ctx: CtxLike, store: ThinkStateStore, getOptions: () => ThinkSummaryConfig, refine?: RefineQueue | null) {
+  const sessions = new Map<string, { open: Set<string>; excluded: Set<string> }>()
+  store.onPause(() => {
+    for (const { open, excluded } of sessions.values()) {
+      for (const key of open) excluded.add(key)
+    }
+  })
+  ctx.on('session/disposed', session => {
+    sessions.delete(session.id)
+    store.untaggedPausedRequests.delete(session.id)
+  })
+
   ctx.on('session/event', (session, event) => {
     try {
       const sid = session?.id
       const data = event?.data
-      if (typeof sid !== 'string' || !data || !['assistant/chunk', 'assistant/message'].includes(event.type)) return
+      if (typeof sid !== 'string' || !data || !['step/start', 'step/end', 'assistant/chunk', 'assistant/message'].includes(event.type)) return
       const { turn, step } = data
       if (!Number.isInteger(turn) || !Number.isInteger(step)) return
+      const key = `${turn}_${step}`
+      let steps = sessions.get(sid)
+      if (!steps) {
+        steps = { open: new Set(), excluded: new Set() }
+        sessions.set(sid, steps)
+      }
+      if (event.type === 'step/end') {
+        steps.open.delete(key)
+        if (store.untaggedPausedRequests.delete(sid)) steps.excluded.add(key)
+        return
+      }
+      if (event.type === 'step/start') {
+        store.untaggedPausedRequests.delete(sid)
+        steps.open.add(key)
+        if (store.paused) steps.excluded.add(key)
+        return
+      }
+      if (event.type === 'assistant/chunk') steps.open.add(key)
+      if (store.untaggedPausedRequests.delete(sid) || store.paused) steps.excluded.add(key)
       const state = store.get(sid)
       const realtime = state?.thinks.slice().reverse().find(t => t.id.startsWith('s') && t.turn === undefined)
       if (realtime) { realtime.turn = turn; realtime.step = step; store.touch(sid) }
       if (event.type !== 'assistant/message') return
+      steps.open.delete(key)
       store.sweep()
       const opts = getOptions()
-      if (opts.enabled === false || store.paused) return
+      if (opts.enabled === false || steps.excluded.has(key)) return
       if (state?.thinks.some(t => t.turn === turn && t.step === step && t.segments.length)) return
       const blocks = data.message?.content
       if (!Array.isArray(blocks)) return

@@ -13,8 +13,12 @@ export function installDetect(ctx: CtxLike, store: ThinkStateStore, getOptions: 
   ctx.on('llm/stream', (request: GenerateOptions, next: () => AsyncIterable<StreamChunk>) => {
     let options: ThinkSummaryConfig
     try { options = getOptions() } catch { return next() }
-    if (options.enabled === false || store.paused || request.purpose || !request.sessionId) return next()
+    if (options.enabled === false || request.purpose || !request.sessionId) return next()
     const sessionId = request.sessionId
+    if (store.paused) {
+      store.untaggedPausedRequests.add(sessionId)
+      return next()
+    }
     // Call upstream exactly once, outside summary error handling.
     const inner = next()
     try {
@@ -27,7 +31,6 @@ export function installDetect(ctx: CtxLike, store: ThinkStateStore, getOptions: 
         codeMode: options.codeBlockMode === 'ignore' ? 'ignore' : 'keep',
         tableMode: options.tableMode === 'ignore' ? 'ignore' : 'keep',
       }, (text, tokens, meta, isTail, rawTokens) => {
-        if (!detector.inSplice) return
         const index = think.segments.length
         const choice = summarizeSegment(text, meta, {
           skipCode: options.codeBlockMode === 'keep-skip',
@@ -50,6 +53,7 @@ export function installDetect(ctx: CtxLike, store: ThinkStateStore, getOptions: 
       const observe = (chunk: StreamChunk) => {
         const paused = store.paused || getOptions().enabled === false
         if (paused && !wasPaused) {
+          if (store.paused && think.turn === undefined) store.untaggedPausedRequests.add(sessionId)
           segmenter.resetForPause()
           detector.reset()
           think.tokens = 0
