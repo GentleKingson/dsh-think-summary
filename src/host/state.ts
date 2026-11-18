@@ -39,6 +39,7 @@ export interface ThinkGroup {
 
 export interface ThinkState {
   sessionId: string
+  currentTurn?: number
   /** 是否有活跃思考。 */
   active: boolean
   /** 当前思考是否已判定长思考。 */
@@ -59,6 +60,7 @@ const TTL_SEG_MS = Infinity
 /** 磁盘持久化格式（dsh-think-summary.json 单文件）。 */
 export interface SavedThinkState {
   sessionId: string
+  currentTurn?: number
   thinkingTokens: number
   updatedAt: number
   thinks: ThinkGroup[]
@@ -128,12 +130,21 @@ export class ThinkStateStore {
     return s
   }
 
+  startTurn(sessionId: string, turn: number): void {
+    const state = this.get(sessionId) ?? this.create(sessionId)
+    if (state.currentTurn !== undefined && turn <= state.currentTurn) return
+    state.currentTurn = turn
+    state.updatedAt = Date.now()
+    this.notify()
+  }
+
   /** 实时路径：开始一次新思考（每次 llm/stream 调用 = 一个新 think）。 */
   beginThink(sessionId: string): { state: ThinkState; think: ThinkGroup } {
     let s = this.map.get(sessionId)
     if (!s) s = this.create(sessionId)
     const think: ThinkGroup = {
       id: `s${s.nextThinkId++}`,
+      turn: s.currentTurn,
       active: true,
       tokens: 0,
       startedAt: Date.now(),
@@ -204,6 +215,7 @@ export class ThinkStateStore {
     if (!s) return undefined
     return {
       sessionId: s.sessionId,
+      currentTurn: s.currentTurn,
       active: s.active,
       inSplice: s.inSplice,
       thinkingTokens: s.thinkingTokens,
@@ -226,6 +238,7 @@ export class ThinkStateStore {
       if (!hasSegs) continue
       out.push({
         sessionId: s.sessionId,
+        currentTurn: s.currentTurn,
         thinkingTokens: s.thinkingTokens,
         updatedAt: s.updatedAt,
         thinks: s.thinks.map((t) => ({
@@ -268,6 +281,9 @@ export class ThinkStateStore {
           step: typeof t.step === 'number' ? t.step : undefined,
           segments: t.segments.filter(seg => seg && typeof seg.summary === 'string' && Number.isInteger(seg.index)).map(seg => ({ ...seg, unrefinedReason: !seg.refined && !seg.skipReason && !seg.unrefinedReason && seg.kind !== 'self' ? '上次运行已结束，保留原摘要' : seg.unrefinedReason })),
         }))
+      s.currentTurn ??= Number.isSafeInteger(rec.currentTurn) ? rec.currentTurn
+        : restored.reduce<number | undefined>((latest, t) =>
+          t.turn === undefined ? latest : Math.max(latest ?? t.turn, t.turn), undefined)
       const used = new Set(s.thinks.map(t => t.id))
       for (const t of restored) {
         const serial = /^s\d+$/.test(t.id) ? Number(t.id.slice(1)) : 0

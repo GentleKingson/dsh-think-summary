@@ -22,9 +22,15 @@ export function installFallback(ctx: CtxLike, store: ThinkStateStore, getOptions
     try {
       const sid = session?.id
       const data = event?.data
-      if (typeof sid !== 'string' || !data || !['step/start', 'step/end', 'assistant/chunk', 'assistant/message'].includes(event.type)) return
+      if (typeof sid !== 'string' || !Number.isInteger(data?.turn)) return
+      if (event.type === 'turn/start') {
+        store.startTurn(sid, data.turn)
+        return
+      }
+      if (!['step/start', 'step/end', 'assistant/chunk', 'assistant/message'].includes(event.type)) return
       const { turn, step } = data
       if (!Number.isInteger(turn) || !Number.isInteger(step)) return
+      if (store.get(sid)) store.startTurn(sid, turn)
       const key = `${turn}_${step}`
       let steps = sessions.get(sid)
       if (!steps) {
@@ -45,7 +51,7 @@ export function installFallback(ctx: CtxLike, store: ThinkStateStore, getOptions
       if (event.type === 'assistant/chunk') steps.open.add(key)
       if (store.untaggedPausedRequests.delete(sid) || store.paused) steps.excluded.add(key)
       const state = store.get(sid)
-      const realtime = state?.thinks.slice().reverse().find(t => t.id.startsWith('s') && t.turn === undefined)
+      const realtime = state?.thinks.slice().reverse().find(t => t.id.startsWith('s') && t.step === undefined && (t.turn === undefined || t.turn === turn))
       if (realtime) { realtime.turn = turn; realtime.step = step; store.touch(sid) }
       if (event.type !== 'assistant/message') return
       steps.open.delete(key)
@@ -68,6 +74,7 @@ export function installFallback(ctx: CtxLike, store: ThinkStateStore, getOptions
       }, { skipCode: opts.codeBlockMode !== 'keep-refine', skipTable: opts.tableMode !== 'keep-refine' })
       if (!outcomes.length) return
       const { state: target, think } = store.ensureThink(sid, `t${turn}_${step}`)
+      store.startTurn(sid, turn)
       think.turn = turn; think.step = step
       const source = data.message?.source
       for (const [i, outcome] of outcomes.entries()) {

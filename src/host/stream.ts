@@ -53,7 +53,7 @@ export function installDetect(ctx: CtxLike, store: ThinkStateStore, getOptions: 
       const observe = (chunk: StreamChunk) => {
         const paused = store.paused || getOptions().enabled === false
         if (paused && !wasPaused) {
-          if (store.paused && think.turn === undefined) store.untaggedPausedRequests.add(sessionId)
+          if (store.paused && think.step === undefined) store.untaggedPausedRequests.add(sessionId)
           segmenter.resetForPause()
           detector.reset()
           think.tokens = 0

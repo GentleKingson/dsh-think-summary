@@ -1,9 +1,7 @@
 /**
  * 输入框上方实时面板（conversation.input.dock 槽位）：
  * 样式配合输入框（宽度对齐官方 todo/queue dock）；可折叠、多行；
- * 只实时显示**当前这次思考**的每段摘要（思考中实时滚动，结束后短暂保留；
- * 新思考积累期保留上次思考摘要作为参照，首个新段出现即切换）。
- *
+ * 展示当前轮次全部摘要，下一轮开始时切换。
  */
 
 function makeInputDock() {
@@ -11,27 +9,30 @@ function makeInputDock() {
     const sessionId = props && props.sessionId
     const { state, enabled, paused } = useThinkState(sessionId)
     const [open, setOpen] = React.useState(true)
-    const [prevOpen, setPrevOpen] = React.useState(false)
     const [pauseBusy, setPauseBusy] = React.useState(false)
-    // 自动滚底（对齐"思考总结"选项卡行为）：数据更新时若停在底部则跟随滚底，
-    // 用户上滚即锁定，滚回底部自动恢复
     const bodyRef = React.useRef(null)
-    const atBottomRef = React.useRef(true)
+    const latestRef = React.useRef(null)
 
-    // 滚底跟随：state（新分段/新思考）更新后，仅当用户停在底部才滚到底部。
-    // 首次挂载强制滚底；scroll 事件实时更新 atBottom。
-    React.useEffect(() => {
-      const el = bodyRef.current
-      if (!el) return undefined
-      const update = () => {
-        const floor = Math.max(0, el.scrollHeight - el.clientHeight)
-        atBottomRef.current = floor - el.scrollTop <= 25
-      }
-      el.addEventListener('scroll', update, { passive: true })
-      update()
-      if (atBottomRef.current) el.scrollTop = el.scrollHeight
-      return () => el.removeEventListener('scroll', update)
-    }, [state])
+    const thinks = state && state.sessionId === sessionId ? state.thinks : []
+    // 没有轮号的旧记录只能可靠地展示最近一次思考。
+    const groups = state?.currentTurn === undefined
+      ? thinks.slice(-1)
+      : thinks.filter((t) => t.turn === state.currentTurn)
+          .sort((a, b) => (a.step ?? Infinity) - (b.step ?? Infinity))
+    const active = groups.some((t) => t.active)
+    const tokens = groups.reduce((sum, t) => sum + t.tokens, 0)
+    const visible = groups.filter((t) => t.segments.length)
+    const lastGroup = visible[visible.length - 1]
+    const latest = lastGroup?.segments[lastGroup.segments.length - 1]
+    const latestKey = latest ? lastGroup.id + ':' + latest.index : null
+
+    React.useLayoutEffect(() => {
+      const body = bodyRef.current
+      const segment = latestRef.current
+      if (!body || !segment) return
+      // 只滚动面板，把新段开头带到可视区域。
+      body.scrollTop += segment.getBoundingClientRect().top - body.getBoundingClientRect().top - body.clientTop
+    }, [sessionId, latestKey, open, enabled])
 
     if (!enabled) return null // 插件总开关关闭：不显示实时思考面板
 
@@ -54,76 +55,27 @@ function makeInputDock() {
       }
     }
 
-    // 只取"当前这次思考"：活跃的 think 优先；无活跃则最近一次（常驻显示最近一次）
-    let think = null
-    let prev = null
-    if (state && state.thinks && state.thinks.length > 0) {
-      think = state.thinks.find((t) => t.active) || state.thinks[state.thinks.length - 1]
-      const idx = state.thinks.indexOf(think)
-      if (idx > 0) prev = state.thinks[idx - 1]
-    }
-    // 新思考积累期（活跃且还没有段）：保留上次思考摘要作为参照，首个新段出现即切换
-    const accumulating = think !== null && think.active && think.segments.length === 0
-
-    const active = think ? think.active : false
-    const refinedCount = think ? think.segments.filter((s) => s.refined).length : 0
-
-    const segEls = (t, prefix) =>
-      (t ? t.segments : []).map((s) =>
+    const segments = visible.flatMap((t) => t.segments)
+    const refinedCount = segments.filter((s) => s.refined).length
+    const body = visible.length ? visible.flatMap((t, i) =>
+      t.segments.map((s) =>
         React.createElement(
-          'div', { key: t.id + ':' + s.index, className: 'ts-dock-seg' },
+          'div', {
+            key: t.id + ':' + s.index,
+            className: 'ts-dock-seg',
+            ref: s === latest ? latestRef : null,
+          },
           React.createElement(
             'div', { className: 'ts-dock-seg-head' },
-            React.createElement('span', null, segHeadLabel(s, prefix)),
+            React.createElement('span', null, segHeadLabel(s, visible.length > 1 ? '思考 ' + (i + 1) + ' · ' : '')),
             segStatusEl(s),
           ),
           React.createElement('div', { className: 'ts-dock-seg-text' }, s.summary),
         ),
       )
-
-    // 主体内容
-    let body
-    if (think === null) {
-      body = React.createElement('div', { className: 'ts-dock-placeholder' }, '等待模型思考，超阈值后开始分段总结…')
-    } else if (accumulating) {
-      // 新思考积累中：保留上次思考摘要（标注），当前思考占位行
-      const prevBlock = prev && prev.segments.length > 0
-        ? React.createElement(
-            React.Fragment,
-            null,
-            React.createElement('div', { className: 'ts-dock-placeholder', style: { paddingBottom: 2 } }, '上次思考总结（保留中，新段出现后切换）'),
-            ...segEls(prev, '上次 · '),
-          )
-        : null
-      body = React.createElement(
-        React.Fragment,
-        null,
-        prevBlock,
-        React.createElement('div', { className: 'ts-dock-placeholder' }, '当前思考积累中 · ' + fmtTok(think.tokens) + ' tok…'),
-      )
-    } else {
-      // 当前思考已有段：显示当前段；上次思考收成可展开一行
-      const prevToggle = prev && prev.segments.length > 0
-        ? React.createElement(
-            'button',
-            {
-              type: 'button',
-              className: 'ts-dock-prev',
-              onClick: () => setPrevOpen(!prevOpen),
-              'aria-expanded': prevOpen ? 'true' : 'false',
-            },
-            chevronRightEl('ts-dock-prev-chevron'),
-            React.createElement('span', null, '上次思考 · ' + prev.segments.length + ' 段'),
-          )
-        : null
-      body = React.createElement(
-        React.Fragment,
-        null,
-        think.segments.length > 0 ? segEls(think, '') : React.createElement('div', { className: 'ts-dock-placeholder' }, '正在积累思考…'),
-        prevToggle,
-        prevOpen && prev ? React.createElement('div', { className: 'ts-dock-prev-body' }, ...segEls(prev, '上次 · ')) : null,
-      )
-    }
+    ) : React.createElement('div', { className: 'ts-dock-placeholder' },
+      active ? '正在积累思考…' : '本轮暂无分段摘要',
+    )
 
     return React.createElement(
       'div', { className: 'ts-dock', 'data-open': open ? 'true' : 'false' },
@@ -143,13 +95,13 @@ function makeInputDock() {
           React.createElement('span', { className: 'ts-dock-title' }, '思考总结'),
           React.createElement(
             'span', { className: 'ts-dock-progress' },
-            think === null
+            !groups.length
               ? '等待思考…'
               : paused
                 ? '已暂停 · 不再更新'
                 : active
-                  ? '思考中 · ' + fmtTok(think.tokens) + ' tok · ' + think.segments.length + ' 段'
-                  : '思考结束 · ' + fmtTok(think.tokens) + ' tok · ' + think.segments.length + ' 段',
+                  ? '思考中 · ' + fmtTok(tokens) + ' tok · ' + segments.length + ' 段'
+                  : '思考结束 · ' + fmtTok(tokens) + ' tok · ' + segments.length + ' 段',
           ),
           paused ? React.createElement('span', { className: 'ts-dock-paused' }, '已暂停') : null,
           active && !paused ? React.createElement('span', { className: 'ts-dock-dot' }) : null,
