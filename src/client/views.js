@@ -87,11 +87,12 @@ function makeThinkSummaryView() {
     // 只显示有输出的思考；正序（最新的在底部）
     const visible = thinks.filter((t) => t.segments && t.segments.length > 0)
     const toggle = (id) => setOpenMap((m) => {
-      const next = { ...m, [id]: !m[id] }
+      const key = JSON.stringify([sessionId, id])
+      const next = { ...m, [key]: !(m[key] ?? true) }
       writeOpenMap(next) // 持久化折叠状态：切选项卡/重挂不丢失
       return next
     })
-    const open = (id) => (openMap[id] === undefined ? true : openMap[id])
+    const open = (id) => (openMap[JSON.stringify([sessionId, id])] ?? true)
 
     const thinkCards = visible.map((t) => {
       const segs = (t.segments || []).map((s) =>

@@ -85,7 +85,7 @@ console.log('\n[4] 有序列表与任务项为边界信号')
 const orderedText =
   '一段较长的论述文字，用来把缓冲推过最小窗口，接着出现有序列表作为新的逻辑单元，这里再补充一点内容。\n' +
   '1. 第一步要做的事\n2. 第二步要做的事\n3. 第三步要做的事\n' +
-  '列表后的补充说明文字。\n'
+  '列表后的补充说明文字，需要说明每项任务的输入、输出与验收条件，并补充依赖关系和执行顺序，确保列表整体超过六十四个 token 的尾段下限。\n'
 const static4 = segmentText(orderedText, { segmentMinTokens: 40, segmentMaxTokens: 2000 })
 ok('静态：列表边界处有切点（≥2 段）', static4.length >= 2)
 if (static4.length >= 2) ok('静态：有序列表项起始新段', /^\s*1\.\s/.test(static4[1].text))

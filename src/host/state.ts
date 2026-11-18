@@ -47,8 +47,6 @@ export interface ThinkState {
   thinkingTokens: number
   updatedAt: number
   thinks: ThinkGroup[]
-  /** 内部去重集合；view() 时剥离。 */
-  hashes: Set<string>
   /** think 序号（s<序号> 分配）。 */
   nextThinkId: number
 }
@@ -56,7 +54,7 @@ export interface ThinkState {
 /** 无段会话的清理 TTL（10 分钟空闲即清）。 */
 const TTL_MS = 10 * 60 * 1000
 /** 有思考总结段的会话保留更久（回看历史消息仍能显示总结条）。 */
-const TTL_SEG_MS = 60 * 60 * 1000
+const TTL_SEG_MS = Infinity
 
 /** 磁盘持久化格式（dsh-think-summary.json 单文件）。 */
 export interface SavedThinkState {
@@ -75,13 +73,32 @@ export class ThinkStateStore {
   /** 状态变更监听（持久化写盘用）。 */
   private listeners = new Set<() => void>()
 
+  // GenerateOptions only carries the session ID. The next assistant event binds
+  // a skipped primary request to its turn and step, even after a resume.
+  readonly untaggedPausedRequests = new Set<string>()
+
   /**
    * 全局暂停（客户端标题栏"暂停"按钮，非设置项）：
    * 暂停后不再检测/分段/精炼/兜底任何新思考，旧总结照常显示；
    * 与配置 enabled 区分：enabled=false 客户端隐藏全部总结 UI，
    * paused=true 仅停止新产出，UI 保留。
    */
-  paused = false
+  private _paused = false
+  private pauseListeners = new Set<() => void>()
+  get paused() { return this._paused }
+  set paused(value: boolean) {
+    this._paused = value
+    if (value) for (const listener of this.pauseListeners) { try { listener() } catch {} }
+  }
+  onPause(listener: () => void) { this.pauseListeners.add(listener) }
+  touch(sessionId: string): void {
+    const state = this.get(sessionId)
+    if (state) { state.updatedAt = Date.now(); this.notify() }
+  }
+  updateSegment(sid: string, tid: string, index: number, patch: Partial<SegmentSummary>): void {
+    const segment = this.get(sid)?.thinks.find(t => t.id === tid)?.segments.find(s => s.index === index)
+    if (segment) { Object.assign(segment, patch); this.touch(sid) }
+  }
 
   get(sessionId: string): ThinkState | undefined {
     return this.map.get(sessionId)
@@ -94,7 +111,7 @@ export class ThinkStateStore {
   }
 
   private notify(): void {
-    for (const l of this.listeners) l()
+    for (const l of this.listeners) { try { l() } catch { /* observer isolation */ } }
   }
 
   private create(sessionId: string): ThinkState {
@@ -105,7 +122,6 @@ export class ThinkStateStore {
       thinkingTokens: 0,
       updatedAt: Date.now(),
       thinks: [],
-      hashes: new Set(),
       nextThinkId: 1,
     }
     this.map.set(sessionId, s)
@@ -183,7 +199,7 @@ export class ThinkStateStore {
   }
 
   /** 供 Client 轮询的纯 JSON 视图（剥离内部 hashes/nextThinkId）。 */
-  view(sessionId: string): Omit<ThinkState, 'hashes' | 'nextThinkId'> | undefined {
+  view(sessionId: string): Omit<ThinkState, 'nextThinkId'> | undefined {
     const s = this.get(sessionId)
     if (!s) return undefined
     return {
@@ -219,7 +235,7 @@ export class ThinkStateStore {
           startedAt: t.startedAt,
           turn: t.turn,
           step: t.step,
-          segments: t.segments.map((seg) => ({ ...seg })),
+          segments: t.segments.filter(seg => seg && typeof seg.summary === 'string' && Number.isInteger(seg.index)).map(seg => ({ ...seg })),
         })),
         nextThinkId: s.nextThinkId,
       })
@@ -232,13 +248,16 @@ export class ThinkStateStore {
     if (!Array.isArray(saved)) return
     for (const rec of saved) {
       if (!rec || typeof rec.sessionId !== 'string' || !Array.isArray(rec.thinks)) continue
-      const hasSegs = rec.thinks.some((t) => t.segments && t.segments.length > 0)
+      const hasSegs = rec.thinks.some((t) => t && Array.isArray(t.segments) && t.segments.length > 0)
       if (!hasSegs) continue // 只恢复有输出的总结
-      const s = this.create(rec.sessionId)
-      s.thinkingTokens = typeof rec.thinkingTokens === 'number' ? rec.thinkingTokens : 0
-      s.updatedAt = typeof rec.updatedAt === 'number' ? rec.updatedAt : Date.now()
-      s.nextThinkId = typeof rec.nextThinkId === 'number' && rec.nextThinkId > 0 ? rec.nextThinkId : 1
-      s.thinks = rec.thinks
+      const live = this.get(rec.sessionId)
+      const s = live ?? this.create(rec.sessionId)
+      if (!live) {
+        s.thinkingTokens = typeof rec.thinkingTokens === 'number' ? rec.thinkingTokens : 0
+        s.updatedAt = typeof rec.updatedAt === 'number' ? rec.updatedAt : Date.now()
+      }
+      if (Number.isSafeInteger(rec.nextThinkId)) s.nextThinkId = Math.max(s.nextThinkId, rec.nextThinkId)
+      const restored: ThinkGroup[] = rec.thinks
         .filter((t) => t && Array.isArray(t.segments))
         .map((t) => ({
           id: String(t.id),
@@ -247,26 +266,20 @@ export class ThinkStateStore {
           startedAt: typeof t.startedAt === 'number' ? t.startedAt : Date.now(),
           turn: typeof t.turn === 'number' ? t.turn : undefined,
           step: typeof t.step === 'number' ? t.step : undefined,
-          segments: t.segments.map((seg) => ({ ...seg })),
+          segments: t.segments.filter(seg => seg && typeof seg.summary === 'string' && Number.isInteger(seg.index)).map(seg => ({ ...seg, unrefinedReason: !seg.refined && !seg.skipReason && !seg.unrefinedReason && seg.kind !== 'self' ? '上次运行已结束，保留原摘要' : seg.unrefinedReason })),
         }))
+      const used = new Set(s.thinks.map(t => t.id))
+      for (const t of restored) {
+        const serial = /^s\d+$/.test(t.id) ? Number(t.id.slice(1)) : 0
+        if (Number.isSafeInteger(serial)) s.nextThinkId = Math.max(s.nextThinkId, serial + 1)
+      }
+      for (const t of restored) {
+        // Queued refinements and stream closures already reference the live IDs.
+        if (used.has(t.id)) t.id = `s${s.nextThinkId++}`
+        used.add(t.id)
+      }
+      s.thinks = restored.concat(s.thinks)
     }
   }
 
-  /**
-   * 清理"已归档"会话的总结（非活跃 + 空闲超过 graceMs；保留活跃/运行中会话）。
-   * @returns 移除的会话数（含内存态与可写盘标记——调用方负责落盘）。
-   */
-  clearArchived(graceMs = 0, now = Date.now()): number {
-    let removed = 0
-    for (const [k, s] of this.map) {
-      if (s.active) continue // 运行中的思考不清理
-      const idle = now - s.updatedAt
-      if (idle >= graceMs) {
-        this.map.delete(k)
-        removed++
-      }
-    }
-    if (removed > 0) this.notify()
-    return removed
-  }
 }

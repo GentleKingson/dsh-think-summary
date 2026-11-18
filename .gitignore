@@ -6,8 +6,7 @@ node_modules/
 lib/
 *.tsbuildinfo
 
-# library: lockfile 不纳入版本库
-package-lock.json
+# npm lockfile is committed for reproducible rc.3 regression tests
 pnpm-lock.yaml
 
 # logs

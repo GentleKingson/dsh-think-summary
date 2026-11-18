@@ -84,6 +84,9 @@ export class Segmenter {
   private readonly codeMode: 'ignore' | 'keep'
   private readonly tableMode: 'ignore' | 'keep'
   private lastHash = ''
+  // Only complete pieces produced before the long-thinking threshold opens.
+  private deferred: Parameters<SegmentSink['onSegment']>[] = []
+  private ignoredTableContinuation = false
   /** ignore 模式状态：当前忽略区类型。 */
   private ignore: 'none' | 'fence' | 'table' = 'none'
   private metaLines = 0
@@ -125,9 +128,14 @@ export class Segmenter {
    * 忽略区的文本**不累计**到段缓冲/段 token，但返回值始终是真实计数——
    * 检测器据此计入总 token（长思考阈值/进度含代码量，见 docs/segment-optimization.md）。
    */
-  feed(text: string): RawCount {
+  feed(text: string, onCount?: (raw: RawCount) => void): RawCount {
     if (!text) return { cjk: 0, other: 0 }
     const raw = countRaw(text)
+    onCount?.(raw)
+    if (this.deferred.length && this.gate()) {
+      for (const piece of this.deferred) this.emit(...piece)
+      this.deferred = []
+    }
     this.pendingCjk += raw.cjk
     this.pendingOther += raw.other
     this.pending += text
@@ -139,7 +147,17 @@ export class Segmenter {
         const lr = countRaw(line)
         this.pendingCjk -= lr.cjk
         this.pendingOther -= lr.other
-        this.handleLine(line)
+        this.handleFragment(line, true)
+        continue
+      }
+      // Hard memory ceiling also covers punctuation-free lines and ignored blocks.
+      if (this.pending.length > 65_536) {
+        const part = this.pending.slice(0, 65_536)
+        this.pending = this.pending.slice(65_536)
+        const count = countRaw(part)
+        this.pendingCjk -= count.cjk
+        this.pendingOther -= count.other
+        this.handleFragment(part, false)
         continue
       }
       // 超长无换行行：估算 token 接近半个 max 时按句末标点拆出前部句子
@@ -149,7 +167,7 @@ export class Segmenter {
       if (
         rawToTokens({ cjk: this.pendingCjk, other: this.pendingOther }) > pendingSplitTokens(this.max) &&
         !FENCE_RE.test(trimmed) &&
-        !trimmed.startsWith('|')
+        !this.ignoredTableContinuation && !trimmed.includes('|')
       ) {
         const m = this.pending.match(/^[^。！？!?；;]*[。！？!?；;]/)
         if (m && m[0].length > 0 && m[0].length < this.pending.length) {
@@ -158,13 +176,22 @@ export class Segmenter {
           const sr = countRaw(sentence)
           this.pendingCjk -= sr.cjk
           this.pendingOther -= sr.other
-          this.handleLine(sentence)
+          this.handleFragment(sentence, false)
           continue
         }
       }
       break
     }
     return raw
+  }
+
+  private handleFragment(text: string, endsLine: boolean): void {
+    if (this.ignoredTableContinuation) {
+      this.ignoreTokens += this.lineTokens(text)
+    } else {
+      this.handleLine(text)
+    }
+    this.ignoredTableContinuation = !endsLine && this.ignore === 'table'
   }
 
   private handleLine(line: string): void {
@@ -237,6 +264,7 @@ export class Segmenter {
       if (this.tableMode === 'ignore') {
         this.ignore = 'table'
         this.metaLines = 1
+        this.ignoreTokens = this.lineTokens(line)
         return
       }
       this.append(line)
@@ -258,8 +286,11 @@ export class Segmenter {
   }
 
   private append(line: string): void {
-    this.buf += line + '\n'
-    const r = countRaw(line)
+    const kept = line.slice(0, Math.max(0, 200_000 - this.buf.length - 1))
+    this.pendingIgnoreTokens += this.lineTokens(line.slice(kept.length))
+    if (!kept && this.buf.length >= 199_999) return
+    this.buf += kept + '\n'
+    const r = countRaw(kept)
     this.cjk += r.cjk
     this.other += r.other
   }
@@ -284,9 +315,12 @@ export class Segmenter {
     const h = hashText(text)
     if (h === this.lastHash) return
     this.lastHash = h
-    const rawTokens = estimateTokens(text) + this.pendingIgnoreTokens
+    const tokens = estimateTokens(text)
+    const rawTokens = tokens + this.pendingIgnoreTokens
     this.pendingIgnoreTokens = 0
-    this.emit(text, estimateTokens(text), analyzeMeta(text), isTail, rawTokens)
+    const piece: Parameters<SegmentSink['onSegment']> = [text, tokens, analyzeMeta(text), isTail, rawTokens]
+    if (this.gate()) this.emit(...piece)
+    else this.deferred.push(piece)
   }
 
   /** max 切点：优先句末回退，其次行末，最后当前位置。 */
@@ -303,8 +337,17 @@ export class Segmenter {
     return nl === -1 ? n : nl + 1
   }
 
+  private finishPendingLine(): void {
+    if (this.pending) this.handleFragment(this.pending, true)
+    this.pending = ''
+    this.pendingCjk = 0
+    this.pendingOther = 0
+    this.ignoredTableContinuation = false
+  }
+
   /** 外部强边界（blockType 从 reasoning 切换）：忽略区先收尾元信息，再切段（需达最小窗口）。 */
   signalBoundary(): void {
+    this.finishPendingLine()
     if (this.ignore !== 'none') {
       if (this.ignore === 'fence') this.onMeta?.({ kind: 'code', lines: this.metaLines, lang: this.metaLang || undefined })
       else this.onMeta?.({ kind: 'table', lines: this.metaLines })
@@ -327,12 +370,7 @@ export class Segmenter {
 
   /** 流结束：处理未完成行/忽略区，flush 末尾段（低于下限则丢弃；未达门控不切）。 */
   flush(): void {
-    if (this.pending) {
-      this.handleLine(this.pending)
-      this.pending = ''
-      this.pendingCjk = 0
-      this.pendingOther = 0
-    }
+    this.finishPendingLine()
     if (this.ignore !== 'none') {
       if (this.ignore === 'fence') this.onMeta?.({ kind: 'code', lines: this.metaLines, lang: this.metaLang || undefined })
       else this.onMeta?.({ kind: 'table', lines: this.metaLines })
@@ -349,6 +387,7 @@ export class Segmenter {
       if (this.buf) this.cutBuf()
     }
     if (this.gate() && this.tokenCount() >= MIN_SEGMENT_FLOOR) this.cutBuf(this.buf.length, true) // 尾巴段：保留且标记（精炼）
+    this.deferred = []
   }
 
   get bufferedTokens(): number {
@@ -361,6 +400,8 @@ export class Segmenter {
    * 不受影响；min/max/canCut/emit 配置保留。
    */
   resetForPause(): void {
+    this.deferred = []
+    this.ignoredTableContinuation = false
     this.buf = ''
     this.cjk = 0
     this.other = 0
@@ -381,75 +422,12 @@ export class Segmenter {
 /**
  * 静态分段（事后兜底用）：对完整思考文本一次性切段。
  * 与流式共享同一套 Markdown 结构规则（代码块/表格原子，超限不切内部；
- * 内容已完整传入，"忽略"无意义，一律保留并带 meta 标记）。
+ * ignore/keep 与实时路径一致，末尾小段使用相同下限）。
  */
 export function segmentText(text: string, options: SegmentOptions = {}): SegmentPiece[] {
-  const min = options.segmentMinTokens ?? 1500
-  const max = options.segmentMaxTokens ?? 3000
   const out: SegmentPiece[] = []
-  let buf = ''
-  let cjk = 0
-  let other = 0
-  let inCode = false
-  let inTable = false
-  const tokens = () => Math.round(cjk + other / 4)
-  const cut = () => {
-    const t = buf.trim()
-    buf = ''
-    cjk = 0
-    other = 0
-    if (t) out.push({ text: t, tokens: estimateTokens(t), meta: analyzeMeta(t) })
-  }
-  for (const rawLine of text.split('\n')) {
-    if (inCode) {
-      if (FENCE_RE.test(rawLine)) {
-        inCode = false
-        buf += rawLine + '\n'
-        const r = countRaw(rawLine)
-        cjk += r.cjk
-        other += r.other
-        cut() // 代码段收尾（含闭合行）
-      } else {
-        buf += rawLine + '\n'
-        const r = countRaw(rawLine)
-        cjk += r.cjk
-        other += r.other
-      }
-      continue
-    }
-    const kind = classifyLine(rawLine, false)
-    if (kind.kind === 'fence-open') {
-      if (tokens() >= min && buf) cut() // 散文段收尾
-      buf += rawLine + '\n'
-      const r = countRaw(rawLine)
-      cjk += r.cjk
-      other += r.other
-      inCode = true
-      continue
-    }
-    if (kind.kind === 'table' || kind.kind === 'table-sep') {
-      if (!inTable) {
-        if (tokens() >= min && buf) cut() // 散文段收尾
-        inTable = true
-      }
-      buf += rawLine + '\n'
-      const r = countRaw(rawLine)
-      cjk += r.cjk
-      other += r.other
-      continue
-    }
-    if (inTable) {
-      // 表格结束：表格段收尾（切在行前）
-      if (kind.kind !== 'blank' && tokens() >= min) cut()
-      inTable = false
-    }
-    if (tokens() >= min && isBoundaryLine(kind.kind, rawLine)) cut() // 边界切在行前
-    buf += rawLine + '\n'
-    const r = countRaw(rawLine)
-    cjk += r.cjk
-    other += r.other
-    if (tokens() >= max) cut()
-  }
-  cut()
+  const segmenter = new Segmenter(options, (text, tokens, meta) => out.push({ text, tokens, meta }))
+  segmenter.feed(text)
+  segmenter.flush()
   return out
 }

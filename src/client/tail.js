@@ -12,52 +12,12 @@
 function makeThinkTail() {
   return function ThinkTail(props) {
     const sessionId = props && props.sessionId
-    const m = props && props.matched
-    const turn = m && m.turn // TurnLocation（含 turn 号与 steps）
-    const [thinks, setThinks] = React.useState([])
-    const [enabled, setEnabled] = React.useState(true)
-    // 默认折叠：总结条收起，点击展开查看各思考分组
+    const turn = props && props.turn
+    const { state, enabled } = useThinkState(sessionId)
+    const thinks = ((state && state.thinks) || [])
+      .filter(t => turn && t.turn === turn.turn && t.segments.length > 0)
+      .sort((a, b) => (a.step ?? 0) - (b.step ?? 0))
     const [open, setOpen] = React.useState(false)
-
-    React.useEffect(() => {
-      if (!sessionId || !turn) return undefined
-      let alive = true
-      let timer = null
-      let tries = 0
-      // 重试窗口：思考长/事件打标可能延迟，最多约 60s（40 次 × 1.5s）
-      const MAX_TRIES = 40
-      const load = async () => {
-        let matched = []
-        try {
-          const res = await fetch(STATE_ROUTE + '?sessionId=' + encodeURIComponent(sessionId))
-          if (res.ok) {
-            const json = await res.json()
-            if (alive) setEnabled(!json || json.enabled !== false)
-            const state = json && json.state
-            matched = state && (state.thinks || []).length > 0
-              ? (state.thinks || [])
-                  .filter((t) => t.turn === turn.turn && t.segments && t.segments.length > 0)
-                  .sort((a, b) => (a.step ?? 0) - (b.step ?? 0))
-              : []
-          }
-        } catch {
-          /* 轮询失败：继续重试 */
-        }
-        if (!alive) return
-        if (matched.length > 0) {
-          setThinks(matched)
-          return // 找到即停（含精炼完成的标记）
-        }
-        // 未找到（请求失败/state 为空/无匹配）都继续重试，直到窗口上限
-        tries++
-        if (tries < MAX_TRIES) timer = setTimeout(load, 1500)
-      }
-      void load()
-      return () => {
-        alive = false
-        if (timer !== null) clearTimeout(timer)
-      }
-    }, [sessionId, turn])
 
     if (!enabled) return null // 插件总开关关闭：不显示总结条
     if (thinks.length === 0) return null

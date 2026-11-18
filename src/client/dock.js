@@ -4,19 +4,7 @@
  * 只实时显示**当前这次思考**的每段摘要（思考中实时滚动，结束后短暂保留；
  * 新思考积累期保留上次思考摘要作为参照，首个新段出现即切换）。
  *
- * 视图过滤：只在"对话"视图显示（轨迹/思考总结等视图隐藏）。
- * 会话 store 的 view 状态在 slot 组件侧不可订阅，故检测 tablist 的
- * aria-selected（chat 视图 tab label = '对话'/'chat'）。
  */
-
-/** 当前激活会话视图是否为"对话"。无 tablist（单视图/hero）视为对话。 */
-function isChatTabActive() {
-  if (typeof document === 'undefined') return true
-  const tab = document.querySelector('[role="tablist"] [role="tab"][aria-selected="true"]')
-  if (!tab) return true
-  const s = (tab.textContent || '').trim()
-  return s === '对话' || s.toLowerCase() === 'chat'
-}
 
 function makeInputDock() {
   return function ThinkInputDock(props) {
@@ -24,23 +12,11 @@ function makeInputDock() {
     const { state, enabled, paused } = useThinkState(sessionId)
     const [open, setOpen] = React.useState(true)
     const [prevOpen, setPrevOpen] = React.useState(false)
-    const [chatView, setChatView] = React.useState(true)
     const [pauseBusy, setPauseBusy] = React.useState(false)
     // 自动滚底（对齐"思考总结"选项卡行为）：数据更新时若停在底部则跟随滚底，
     // 用户上滚即锁定，滚回底部自动恢复
     const bodyRef = React.useRef(null)
     const atBottomRef = React.useRef(true)
-
-    // 视图过滤：只在"对话"视图显示（轨迹/思考总结等视图隐藏）。
-    // 会话 store 的 view 状态在 slot 组件侧不可订阅，故定时检测 tablist 的
-    // aria-selected（chat 视图 tab label = '对话'/'chat'）。
-    React.useEffect(() => {
-      let alive = true
-      const check = () => { if (alive) setChatView(isChatTabActive()) }
-      check()
-      const timer = setInterval(check, 1500)
-      return () => { alive = false; clearInterval(timer) }
-    }, [])
 
     // 滚底跟随：state（新分段/新思考）更新后，仅当用户停在底部才滚到底部。
     // 首次挂载强制滚底；scroll 事件实时更新 atBottom。
@@ -58,7 +34,6 @@ function makeInputDock() {
     }, [state])
 
     if (!enabled) return null // 插件总开关关闭：不显示实时思考面板
-    if (!chatView) return null // 非"对话"视图：隐藏实时思考面板
 
     // 暂停/继续（全局，非设置项）：暂停后不再产出新总结，旧内容照常显示
     const togglePause = async () => {
