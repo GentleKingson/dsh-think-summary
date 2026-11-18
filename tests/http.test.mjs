@@ -9,7 +9,20 @@ import { context } from './helpers.mjs'
 
 test('HTTP methods, host, origin, bodies and unload are guarded', async () => {
   const routes = new Map(), store = new ThinkStateStore()
-  const ctx = context({ webServer: { register(route) { routes.set(route.path, route); return () => routes.delete(route.path) } } })
+  const services = {
+    webServer: { register(route) { routes.set(route.path, route); return () => routes.delete(route.path) } },
+    connection: { admit(req) {
+      const cookie = req.headers.cookie
+      if (cookie === 'owner' || cookie === 'reader') return { peer: { principal: { kind: cookie } } }
+      return { rejection: 401 }
+    } },
+    remoteAccess: { decide({ principal, action, resources }) {
+      const allowed = principal.kind === 'reader' && action === 'think-summary/state' &&
+        resources.length === 1 && resources[0].kind === 'session' && resources[0].id === 's'
+      return { kind: allowed ? 'allow' : 'deny' }
+    } },
+  }
+  const ctx = context(services)
   installRpc(ctx, store, () => ({}))
   const server = createServer((req, res) => {
     const route = routes.get(new URL(req.url, 'http://localhost').pathname)
@@ -19,13 +32,21 @@ test('HTTP methods, host, origin, bodies and unload are guarded', async () => {
   await once(server, 'listening')
   const port = server.address().port
   const call = (path, method = 'GET', headers = {}, body = '') => new Promise((resolve, reject) => {
-    const req = request({ hostname: '127.0.0.1', port, path, method, headers }, res => {
+    const req = request({ hostname: '127.0.0.1', port, path, method, headers: { cookie: 'owner', ...headers } }, res => {
       let text = ''; res.on('data', c => { text += c }); res.on('end', () => resolve({ status: res.statusCode, text }))
     }); req.on('error', reject); req.end(body)
   })
   try {
     assert.equal((await call('/api/think-summary/state?sessionId=s')).status, 200)
     assert.equal((await call('/api/think-summary/state')).status, 400)
+    assert.equal((await call('/api/think-summary/state?sessionId=s', 'GET', { cookie: '' })).status, 401)
+    assert.equal((await call('/api/think-summary/state?sessionId=s', 'GET', { cookie: 'reader' })).status, 200)
+    assert.equal((await call('/api/think-summary/state?sessionId=other', 'GET', { cookie: 'reader' })).status, 403)
+    assert.equal((await call('/api/think-summary/pause', 'POST', { cookie: 'reader', 'content-type': 'application/json' }, '{"paused":true}')).status, 403)
+    const connection = services.connection
+    delete services.connection
+    assert.equal((await call('/api/think-summary/state?sessionId=s')).status, 403)
+    services.connection = connection
     assert.equal((await call('/api/think-summary/state?sessionId=s', 'GET', { host: 'evil.test' })).status, 403)
     assert.equal((await call('/api/think-summary/state?sessionId=s', 'GET', { origin: 'https://evil.test' })).status, 403)
     assert.equal((await call('/api/think-summary/pause')).status, 405)

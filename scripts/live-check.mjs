@@ -9,6 +9,7 @@ import LlmRuntime, { BlockAssembler, createToolResultMessage } from '@deepseek-a
 import { DeepSeekAdapter, resolveAdapterOptions } from '@deepseek-ai/dsh-llm-deepseek'
 import WebServer from '@deepseek-ai/dsh-host-webserver'
 import * as plugin from '../lib/index.js'
+import { testHostCookie } from './test-host-cookie.mjs'
 
 const keyName = process.env.DSH_LIVE_KEY_ENV || 'api_key'
 const key = process.env[keyName]
@@ -52,8 +53,9 @@ const instance = ctx.plugin(plugin, {
   refineConcurrency: 1, refineOutputTokens: 1024, refineTimeout: 60, persistEnabled: true,
 })
 await instance
+const cookie = await testHostCookie(ctx)
 const sid = `live-check-${randomUUID()}`
-const state = async () => (await (await fetch(`${ctx.webServer.getOrigin()}/api/think-summary/state?sessionId=${sid}`)).json()).state
+const state = async () => (await (await fetch(`${ctx.webServer.getOrigin()}/api/think-summary/state?sessionId=${sid}`, { headers: { cookie } })).json()).state
 async function generate(messages, tools) {
   const assembler = new BlockAssembler()
   for await (const chunk of ctx.llm.stream({ provider, model, sessionId: sid, messages, ...(tools ? { tools } : {}), maxTokens: 4096, signal: AbortSignal.timeout(90000) })) assembler.push(chunk)

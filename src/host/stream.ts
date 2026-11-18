@@ -14,7 +14,7 @@ export function installDetect(ctx: CtxLike, store: ThinkStateStore, getOptions: 
     let options: ThinkSummaryConfig
     try { options = getOptions() } catch { return next() }
     if (options.enabled === false || request.purpose || !request.sessionId) return next()
-    const sessionId = request.sessionId
+    const { sessionId, provider, model } = request
     if (store.paused) {
       store.untaggedPausedRequests.add(sessionId)
       return next()
@@ -44,8 +44,8 @@ export function installDetect(ctx: CtxLike, store: ThinkStateStore, getOptions: 
         })
         if (refine && !choice.skipReason && !decision.tooSmall) refine.enqueue({
           sessionId, thinkId: think.id, segmentIndex: index, text,
-          provider: request.provider, fallbackModel: request.model, signal: request.signal,
-        })
+          provider, fallbackModel: model, signal: request.signal,
+        }, options.refineModel)
       })
       let blockType: string | null = null
       let wasPaused = false

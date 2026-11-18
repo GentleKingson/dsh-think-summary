@@ -91,3 +91,21 @@ test('token trimming obeys small budgets for mixed text', () => {
     assert.ok(estimateTokens(trim('中文 hello '.repeat(200), budget)) <= budget)
   }
 })
+
+test('queued fragments retain their original provider and configured model', async () => {
+  const options = { refineConcurrency: 1, refineModel: '' }
+  const calls = []
+  const queue = new RefineQueue(() => options, () => ({ async *stream(request) {
+    calls.push([request.provider, request.model])
+    yield { type: 'text-delta', text: '摘要' }
+  } }), () => {})
+  assert.ok(queue.enqueue(task()))
+  options.refineModel = 'secondary'
+  assert.ok(queue.enqueue({ ...task(1), provider: 'internal' }))
+  options.refineModel = 'another'
+  assert.equal(queue.enqueue({ ...task(2), fallbackModel: '' }), false)
+  assert.equal(queue.enqueue({ ...task(3), provider: '' }), false)
+  await until(() => queue.running === 0)
+  assert.deepEqual(calls, [['provider', 'session-model'], ['internal', 'secondary']])
+  await queue.dispose()
+})

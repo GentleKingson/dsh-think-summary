@@ -58,7 +58,7 @@ Desktop rc.3 已验证宿主加载、客户端文件和官方请求转发。原�
 | `thinkThresholdTokens` | `2000` | 长思考阈值 |
 | `segmentMinTokens` / `segmentMaxTokens` | `1500` / `3000` | 语义分段窗口；运行时上限至少等于下限 |
 | `refineEnabled` | `true` | 另发一次模型请求，把提取的摘要精炼成中文。精炼失败时保留原文语言的摘要 |
-| `refineModel` | `auto` | 沿用该次会话的 provider/model；可填写同 provider 的明确模型 ID |
+| `refineModel` | `auto` | 留空或填 `auto` 跟随会话；可填写同一 provider 的其他模型 ID。已排队的片段使用入队时确定的模型 |
 | `refineMaxInputTokens` | `1500` | 精炼输入头尾裁剪预算 |
 | `refineOutputTokens` | `1024` | 模型完成预算，可能包含推理消耗 |
 | `refineConcurrency` | `2` | 并发数，范围 1–4；等待队列固定最多 64 段 |
@@ -73,7 +73,7 @@ Desktop rc.3 已验证宿主加载、客户端文件和官方请求转发。原�
 ## 稳定性与资源控制
 
 - 精炼调用标记 `purpose: 'think-summary'`，独立 `AbortSignal`，不携带主会话工具或历史。超时、暂停、关闭、主请求取消、插件卸载均停止对应任务；迟到结果不回写。提供方必须遵守取消信号才能实际终止网络/算力消耗。
-- 实时与兜底共用分段器。兜底读取 rc.3 终态 assistant 消息，无第二份流式原文缓存。未完成行最多保留 65,536 字符，段缓冲最多 200,000 字符；极端大代码/表格保留前部，超限内容只计 token；兜底最多处理 200,000 字符。64 token 以下尾段不生成摘要。
+- 实时与兜底共用分段器。兜底读取 rc.3 终态 assistant 消息，无第二份流式原文缓存。未完成行最多保留 65,536 字符，段缓冲最多 200,000 字符；极端大代码/表格保留前部，超限内容只计 token；兜底最多处理 200,000 字符。只有原消息同时标明服务商和模型时才允许精炼。64 token 以下尾段不生成摘要。
 - 同会话的实时面板、历史视图和全部回复条共享一个轮询：活跃/待精炼 1.5 秒，空闲 5 秒；隐藏页面停止请求，卸载取消在途请求。回复条持续接收精炼结果。
 - 历史位于 `$DSH_HOME/dsh-think-summary.json`（缺省 `~/.dsh/`），兼容旧版 version 1 文件。250ms 合并、异步串行、独立临时文件原子替换，正常卸载等待写完。强制杀进程可能丢失最近尚未写入的变更。
 - 历史不会因空闲一小时被删除。仍需按实际使用量管理历史文件；内存历史和单文件存储规模随已记录历史增长。
@@ -87,7 +87,7 @@ Desktop rc.3 已验证宿主加载、客户端文件和官方请求转发。原�
 | GET | `/api/think-summary/state?sessionId=...` | 明确会话的状态，无最近会话回退 |
 | POST | `/api/think-summary/pause` | JSON `{ "paused": true }` |
 
-所有接口校验方法、loopback socket、Host、Origin 和 Fetch Metadata；写接口要求 JSON、16KiB 以内正文和 5 秒读取期限。响应禁用缓存。设置交由宿主原生配置接口处理。Desktop rc.3 使用 `dsh-app://app` 经官方 `forwardWebRequest` 转发至本机 Web Host，已验证 GET、POST 和客户端 bundle 均可通行，无需放宽 Origin 校验。远程 Web 和其他反向代理不在本版支持范围内。
+所有接口使用宿主 Connection 验证身份。受限身份读取摘要需要目标会话的 `think-summary/state` 授权，暂停操作仅限所有者。所有接口校验方法、loopback socket、Host、Origin 和 Fetch Metadata；写接口要求 JSON、16KiB 以内正文和 5 秒读取期限。响应禁用缓存。设置交由宿主原生配置接口处理。Desktop rc.3 使用 `dsh-app://app` 经官方 `forwardWebRequest` 转发至本机 Web Host，已验证 GET、POST 和客户端 bundle 均可通行，无需放宽 Origin 校验。远程 Web 和其他反向代理不在本版支持范围内。
 
 ## 从 0.1.2 迁移
 

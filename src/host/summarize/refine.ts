@@ -12,7 +12,7 @@ export interface RefineTask {
   text: string
   /** 主请求的 provider（与主流同 provider）。 */
   provider: string
-  /** 主请求的 model（auto 解析失败时的兜底）。 */
+  /** 原请求的模型 ID。 */
   fallbackModel: string
   signal?: AbortSignal
 }
@@ -79,7 +79,7 @@ function takeTokens(text: string, budget: number, dir: 1 | -1): string {
 
 /** Bounded side queue. Never inherits the primary request's tools or messages. */
 export class RefineQueue {
-  private queue: RefineTask[] = []
+  private queue: (RefineTask & { model: string })[] = []
   private active = new Map<RefineTask, AbortController>()
   private closed = false
   private jobs = new Set<Promise<void>>()
@@ -92,14 +92,19 @@ export class RefineQueue {
   private fail(task: RefineTask, reason: string) {
     try { this.onFail?.(task.sessionId, task.thinkId, task.segmentIndex, reason) } catch {}
   }
-  enqueue(task: RefineTask): boolean {
+  enqueue(task: RefineTask, configuredModel?: string): boolean {
     const o = resolveConfig(this.getOptions())
     if (this.closed || !o.enabled || !o.refineEnabled || task.signal?.aborted) {
       this.fail(task, '精炼已关闭或取消'); return false
     }
     if (this.queue.length >= 64) { this.fail(task, '精炼队列已满'); return false }
+    if (!task.provider?.trim() || task.provider === 'unknown' || !task.fallbackModel?.trim()) {
+      this.fail(task, '缺少原请求的服务商或模型，仅保留本地摘要'); return false
+    }
+    const selected = (configuredModel ?? o.refineModel).trim()
+    const model = !selected || selected === 'auto' ? task.fallbackModel : selected
     // Bound retained input even while waiting for a worker.
-    this.queue.push({ ...task, text: headTailTrim(task.text, o.refineMaxInputTokens) })
+    this.queue.push({ ...task, model, text: headTailTrim(task.text, o.refineMaxInputTokens) })
     this.pump()
     return true
   }
@@ -134,7 +139,7 @@ export class RefineQueue {
       this.jobs.add(job)
     }
   }
-  private async run(task: RefineTask, controller: AbortController) {
+  private async run(task: RefineTask & { model: string }, controller: AbortController) {
     const o = resolveConfig(this.getOptions())
     const signal = controller.signal
     const abort = () => controller.abort(new Error('精炼已取消'))
@@ -152,12 +157,10 @@ export class RefineQueue {
         signal.throwIfAborted()
         const llm = this.getLlm()
         if (!llm) throw new Error('unavailable')
-        // Context-window size is not model cost. Auto uses the known session model.
-        const model = o.refineModel === 'auto' ? task.fallbackModel : o.refineModel.trim()
-        if (!model || !task.provider || task.provider === 'unknown') throw new Error('unavailable')
+        if (!o.enabled || !o.refineEnabled) throw new Error('disabled')
         let out = ''
         for await (const chunk of llm.stream({
-          provider: task.provider, model, signal,
+          provider: task.provider, model: task.model, signal,
           purpose: 'think-summary', maxTokens: o.refineOutputTokens,
           system: DEFAULT_REFINE_PROMPT,
           messages: [{ role: 'user', content: [{ type: 'text', text: task.text }] }],

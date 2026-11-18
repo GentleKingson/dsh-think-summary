@@ -8,6 +8,7 @@ import { execFileSync } from 'node:child_process'
 import { Context } from '@deepseek-ai/cordis'
 import WebServer from '@deepseek-ai/dsh-host-webserver'
 import * as plugin from '../lib/index.js'
+import { testHostCookie } from './test-host-cookie.mjs'
 
 const root = process.env.DSH_OFFICIAL_SOURCE
 if (!root) throw new Error('Set DSH_OFFICIAL_SOURCE to the official rc.3 checkout')
@@ -22,8 +23,9 @@ const previousHome = process.env.DSH_HOME
 process.env.DSH_HOME = await mkdtemp(join(tmpdir(), 'think-desktop-'))
 const instance = ctx.plugin(plugin, { persistEnabled: false, refineEnabled: false })
 await instance
+const cookie = await testHostCookie(ctx)
 const checks = []
-const forward = (path, init = {}) => forwardWebRequest(new Request(`dsh-app://app${path}`, init), origin, 'test-owned-host-cookie')
+const forward = (path, init = {}) => forwardWebRequest(new Request(`dsh-app://app${path}`, init), origin, cookie)
 try {
   const state = await forward('/api/think-summary/state?sessionId=desktop-test', { headers: { origin: 'dsh-app://app' } })
   assert.equal(state.status, 200)

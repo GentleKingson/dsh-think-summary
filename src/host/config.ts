@@ -29,7 +29,7 @@ export const Config = z.object({
   refineEnabled: z.boolean().default(true).volatile(),
   refineMaxInputTokens: number(1500, 64, 8000),
   refineOutputTokens: number(1024, 64, 4096),
-  refineModel: z.string().default('auto').volatile(),
+  refineModel: z.string().description('auto 或留空跟随会话，也可填写同一服务商的其他模型 ID。').default('auto').volatile(),
   refineConcurrency: number(2, 1, 4),
   refineTimeout: number(60, 1, 120),
   codeBlockMode: mode(),
