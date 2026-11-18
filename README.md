@@ -1,28 +1,52 @@
 # dsh-think-summary
 
-DSH **0.2.2-rc.3** 独立思考摘要插件，版本 **0.2.0**。支持本机 Web profile；DSH Desktop rc.3 的 Host 与官方请求转发链路已通过集成验证，原生窗口 UI 尚未实机验收；纯 Host 装载可记录摘要。Node.js ≥ 24.9.0。
+模型思考时间较长时，输入框上方会逐段显示摘要。回复结束后，可以展开回复末尾的「思考总结」，也可以在会话顶部的同名选项卡里回看。插件读取 `reasoning-delta`，主模型的请求、提示词、工具和对话历史都保持原样。摘要只供阅读。
 
-保留实时思考分段、中文精炼、输入框上方摘要、回复末尾折叠条、历史视图和折叠状态。只观察 `reasoning-delta`，不修改主模型请求、提示词、消息或工具，不将摘要写回会话上下文。精炼失败保留即时提取摘要；提取摘要沿用原文语言，中文输出由精炼提示词要求。
+## 安装
 
-官方基准：[dsh-v0.2.2-rc.3](https://github.com/deepseek-ai/deepseek-harness/tree/dsh-v0.2.2-rc.3)，提交 `38a6a5c965aa99ab525161efb7cc5cf1fe62fced`。接口与验证细节见 [兼容性说明](docs/compatibility-rc3.md)。
+仓库里的插件版本是 `0.2.0`，对应 DSH `0.2.2-rc.3`。Web 和 Desktop 各用自己的 profile，两个客户端都用就分别安装。先用 Node.js 24.9.0 或更高版本打包一次，生成的文件可供两端安装。
 
-## 安装与开发
-
-```bash
+```sh
+git clone https://github.com/GentleKingson/dsh-think-summary.git
+cd dsh-think-summary
 npm ci
-npm test
-# 本地 Web profile
-dsh plugin --profile web add link:/绝对路径/dsh-think-summary
-```
-
-插件通过 `cordis.patch.yml` 装载 Host 和 `./client` 浏览器模块。Host 代码变更需要重启宿主；仅客户端变更重新构建后刷新页面。单个 profile 只装载一个实例。
-
-```bash
-npm run typecheck
-npm run build
-npm run watch:all
 npm pack
 ```
+
+`npm pack` 会自动构建插件，并在当前目录生成 `dsh-think-summary-0.2.0.tgz`。
+
+### DSH Web
+
+在运行 Web 服务的机器上打开终端。用 `dsh --version` 确认宿主版本；使用 npm 安装的 DSH CLI 时，终端还需要能运行 `pnpm`。在安装包所在目录执行：
+
+```sh
+dsh plugin --profile web add ./dsh-think-summary-0.2.0.tgz
+```
+
+运行 `dsh web` 启动服务。如果服务已经在运行，重启后刷新聊天页面。要卸载插件，运行 `dsh plugin --profile web remove dsh-think-summary`。本版支持在本机访问 Web。
+
+### DSH Desktop
+
+1. 打开 Desktop，在侧栏选择「插件」，点「添加插件」。
+2. 输入刚生成的 `dsh-think-summary-0.2.0.tgz` 的完整路径。点「安装」，核对包名和版本。
+3. 安装完成后点「立即启用」。如果界面提示重启，完全退出并重新打开 Desktop。插件详情页也可以停用或卸载它。
+
+如果更习惯命令行，在 Desktop 的应用菜单中打开「管理 dsh 命令…」，安装桌面版提供的命令。首次启动会创建桌面 profile。完全退出应用，再打开新终端，在安装包所在目录执行：
+
+```sh
+dsh --version
+dsh plugin --profile desktop add ./dsh-think-summary-0.2.0.tgz
+```
+
+重新打开 Desktop 即可。命令行卸载时同样先退出应用，再执行 `dsh plugin --profile desktop remove dsh-think-summary`。桌面 profile 由 Desktop 自带的命令管理。[Desktop 官方说明](https://github.com/deepseek-ai/deepseek-harness/blob/dsh-v0.2.2-rc.3/apps/desktop/README.zh.md#bundled-command-runtime)
+
+### 确认安装
+
+打开会话，查看顶部是否出现「思考总结」选项卡。让支持推理的模型回答一个需要多步推导的问题。默认思考量达到约 2000 token 后，输入框上方才会开始显示分段摘要。想用短问题验证，可在插件配置里临时调低 `thinkThresholdTokens` 和 `segmentMinTokens`，再发一条消息。
+
+![输入框上方的分段摘要](assets/screenshots/输入框上方实时思考总结卡片.webp)
+
+Desktop rc.3 已验证宿主加载、客户端文件和官方请求转发。原生窗口的界面仍待实机验收。仅加载 Cordis 宿主端时可以记录摘要。[兼容性说明](docs/compatibility-rc3.md)
 
 ## 设置
 
@@ -33,7 +57,7 @@ npm pack
 | `enabled` | `true` | 开关；关闭后隐藏摘要界面 |
 | `thinkThresholdTokens` | `2000` | 长思考阈值 |
 | `segmentMinTokens` / `segmentMaxTokens` | `1500` / `3000` | 语义分段窗口；运行时上限至少等于下限 |
-| `refineEnabled` | `true` | 独立模型调用生成中文摘要 |
+| `refineEnabled` | `true` | 另发一次模型请求，把提取的摘要精炼成中文。精炼失败时保留原文语言的摘要 |
 | `refineModel` | `auto` | 沿用该次会话的 provider/model；可填写同 provider 的明确模型 ID |
 | `refineMaxInputTokens` | `1500` | 精炼输入头尾裁剪预算 |
 | `refineOutputTokens` | `1024` | 模型完成预算，可能包含推理消耗 |
@@ -71,7 +95,10 @@ npm pack
 
 旧设置桥、模型目录和清理接口已移除。输入框面板不再扫描页面标签文字，随宿主 composer 展示。旧版设计/探测记录只作历史参考，以本 README 与兼容性说明为准。
 
-## 验证
+## 开发与验证
+
+在仓库根目录运行 `npm run build`，然后用 `dsh plugin --profile web add link:.` 链接当前目录。每个 profile 只装一个实例。开发时运行 `npm run watch:all` 自动构建；改客户端后刷新页面，改宿主端后重启 DSH。单独检查类型可运行 `npm run typecheck`。
+
 
 `npm test` 运行真实 rc.3 LLM/Cordis/Loader/Settings 契约测试、队列取消与超时、主流与工具 chunk 透传、持久化恢复、HTTP 防护、共享轮询和分段回归。GitHub Actions 使用 Node 24 与锁定依赖运行同一流程。常规测试使用脚本模型，不消耗真实模型 API 额度。另已使用真实 `deepseek-flash` 验证推理分段、中文精炼、工具往返及持久化，见 [实测记录](docs/validation-rc3.md)。
 
