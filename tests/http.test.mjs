@@ -33,11 +33,19 @@ test('HTTP methods, host, origin, bodies and unload are guarded', async () => {
   const port = server.address().port
   const call = (path, method = 'GET', headers = {}, body = '') => new Promise((resolve, reject) => {
     const req = request({ hostname: '127.0.0.1', port, path, method, headers: { cookie: 'owner', ...headers } }, res => {
-      let text = ''; res.on('data', c => { text += c }); res.on('end', () => resolve({ status: res.statusCode, text }))
+      let text = ''; res.on('data', c => { text += c }); res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, text }))
     }); req.on('error', reject); req.end(body)
   })
   try {
-    assert.equal((await call('/api/think-summary/state?sessionId=s')).status, 200)
+    const first = await call('/api/think-summary/state?sessionId=s')
+    assert.equal(first.status, 200)
+    const etag = first.headers.etag
+    assert.ok(etag)
+    assert.equal((await call('/api/think-summary/state?sessionId=s', 'GET', { cookie: '', 'if-none-match': etag })).status, 401)
+    const unchanged = await call('/api/think-summary/state?sessionId=s', 'GET', { 'if-none-match': etag })
+    assert.equal(unchanged.status, 304); assert.equal(unchanged.text, '')
+    store.startTurn('s', 1)
+    assert.equal((await call('/api/think-summary/state?sessionId=s', 'GET', { 'if-none-match': etag })).status, 200)
     assert.equal((await call('/api/think-summary/state')).status, 400)
     assert.equal((await call('/api/think-summary/state?sessionId=s', 'GET', { cookie: '' })).status, 401)
     assert.equal((await call('/api/think-summary/state?sessionId=s', 'GET', { cookie: 'reader' })).status, 200)

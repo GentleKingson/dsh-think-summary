@@ -1,3 +1,4 @@
+import { diagnose } from './diagnostics.js'
 import type { ThinkStateStore } from './state.js'
 import { estimateTokens } from './detect.js'
 import { processThinking, decideRefine } from './summarize/pipeline.js'
@@ -18,11 +19,12 @@ export function installFallback(ctx: CtxLike, store: ThinkStateStore, getOptions
     store.untaggedPausedRequests.delete(session.id)
   })
 
-  ctx.on('session/event', (session, event) => {
+  ctx.on('session/event', async (session, event) => {
     try {
       const sid = session?.id
       const data = event?.data
       if (typeof sid !== 'string' || !Number.isInteger(data?.turn)) return
+      await store.ensureLoaded(sid)
       if (event.type === 'turn/start') {
         store.startTurn(sid, data.turn)
         return
@@ -90,6 +92,6 @@ export function installFallback(ctx: CtxLike, store: ThinkStateStore, getOptions
       think.tokens = estimateTokens(text)
       target.thinkingTokens = think.tokens
       store.touch(sid)
-    } catch { /* fallback observers never interfere with the session */ }
+    } catch { diagnose('fallback-observer') }
   })
 }

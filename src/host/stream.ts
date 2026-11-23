@@ -1,3 +1,4 @@
+import { diagnose } from './diagnostics.js'
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
 import { ThinkingDetector } from './detect.js'
 import type { ThinkStateStore } from './state.js'
@@ -59,7 +60,7 @@ export function installDetect(ctx: CtxLike, store: ThinkStateStore, getOptions: 
           think.tokens = 0
           state.thinkingTokens = 0
           state.inSplice = false
-          state.updatedAt = Date.now()
+          store.touch(sessionId, false)
         }
         wasPaused = paused
         if (chunk.type === 'block-start') {
@@ -69,7 +70,7 @@ export function installDetect(ctx: CtxLike, store: ThinkStateStore, getOptions: 
           segmenter.feed(chunk.text, raw => detector.feedRaw(raw, { onSpliceStart: () => { state.inSplice = true } }))
           think.tokens = detector.thinkingTokens
           state.thinkingTokens = think.tokens
-          state.updatedAt = Date.now()
+          store.touch(sessionId, false)
         } else if (chunk.type === 'finish') {
           if (chunk.reason?.kind === 'error' || chunk.reason?.kind === 'aborted') {
             failed = true
@@ -82,9 +83,10 @@ export function installDetect(ctx: CtxLike, store: ThinkStateStore, getOptions: 
       return (async function* () {
         let completed = false
         try {
+          await store.ensureLoaded(sessionId)
           for await (const chunk of inner) {
             if (!failed) {
-              try { observe(chunk) } catch { failed = true }
+              try { observe(chunk) } catch { failed = true; diagnose('stream-observer') }
             }
             yield chunk
           }
@@ -97,6 +99,6 @@ export function installDetect(ctx: CtxLike, store: ThinkStateStore, getOptions: 
           try { if (!completed || request.signal?.aborted) refine?.cancelThink(sessionId, think.id) } catch {}
         }
       })()
-    } catch { return inner }
+    } catch { diagnose('stream-observer'); return inner }
   })
 }

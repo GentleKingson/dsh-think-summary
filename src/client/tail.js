@@ -7,7 +7,7 @@
  *  - 组内段摘要 + 原始/精炼双 token + 状态标签；可折叠
  *
  * 槽位契约（Inspect 确认）：owner = { turn: TurnLocation, seq, openFile }；
- * select 返回值作为组件 matched prop。
+ * 组件直接接收 owner props。
  */
 function makeThinkTail() {
   return function ThinkTail(props) {

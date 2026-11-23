@@ -1,3 +1,5 @@
+import { diagnose } from './diagnostics.js'
+
 /**
  * 状态存储（v2）：会话级 + "每次思考"分组。
  * 说明：流上无法获得 turn（探测确认 GenerateOptions 无 turn 字段），
@@ -57,7 +59,7 @@ const TTL_MS = 10 * 60 * 1000
 /** 有思考总结段的会话保留更久（回看历史消息仍能显示总结条）。 */
 const TTL_SEG_MS = Infinity
 
-/** 磁盘持久化格式（dsh-think-summary.json 单文件）。 */
+/** 磁盘持久化格式（按会话保存；兼容旧 version 1）。 */
 export interface SavedThinkState {
   sessionId: string
   currentTurn?: number
@@ -70,10 +72,15 @@ export interface SavedThinkState {
 
 export class ThinkStateStore {
   private map = new Map<string, ThinkState>()
-  /** 最近活跃会话（侧边栏面板缺省 sessionId 时使用）。 */
-  private lastActiveSessionId: string | undefined
   /** 状态变更监听（持久化写盘用）。 */
-  private listeners = new Set<() => void>()
+  private listeners = new Set<(sessionId: string, persist: boolean) => void>()
+  private revision = 0
+  private revisions = new Map<string, number>()
+  ensureLoaded: (sessionId: string) => Promise<void> = async () => {}
+
+  residentIds(): string[] { return [...this.map.keys()] }
+  evict(sessionId: string) { this.map.delete(sessionId); this.revisions.delete(sessionId) }
+  getRevision(sessionId: string) { return this.revisions.get(sessionId) ?? 0 }
 
   // GenerateOptions only carries the session ID. The next assistant event binds
   // a skipped primary request to its turn and step, even after a resume.
@@ -93,9 +100,9 @@ export class ThinkStateStore {
     if (value) for (const listener of this.pauseListeners) { try { listener() } catch {} }
   }
   onPause(listener: () => void) { this.pauseListeners.add(listener) }
-  touch(sessionId: string): void {
+  touch(sessionId: string, persist = true): void {
     const state = this.get(sessionId)
-    if (state) { state.updatedAt = Date.now(); this.notify() }
+    if (state) { state.updatedAt = Date.now(); this.notify(sessionId, persist) }
   }
   updateSegment(sid: string, tid: string, index: number, patch: Partial<SegmentSummary>): void {
     const segment = this.get(sid)?.thinks.find(t => t.id === tid)?.segments.find(s => s.index === index)
@@ -103,17 +110,20 @@ export class ThinkStateStore {
   }
 
   get(sessionId: string): ThinkState | undefined {
-    return this.map.get(sessionId)
+    const state = this.map.get(sessionId)
+    if (state) { this.map.delete(sessionId); this.map.set(sessionId, state) }
+    return state
   }
 
   /** 订阅状态变更（begin/end/push/清理等任何写操作后触发）。 */
-  onChange(listener: () => void): () => void {
+  onChange(listener: (sessionId: string, persist: boolean) => void): () => void {
     this.listeners.add(listener)
     return () => this.listeners.delete(listener)
   }
 
-  private notify(): void {
-    for (const l of this.listeners) { try { l() } catch { /* observer isolation */ } }
+  private notify(sessionId: string, persist = true): void {
+    this.revisions.set(sessionId, ++this.revision)
+    for (const l of this.listeners) { try { l(sessionId, persist) } catch { diagnose('state-observer') } }
   }
 
   private create(sessionId: string): ThinkState {
@@ -135,7 +145,7 @@ export class ThinkStateStore {
     if (state.currentTurn !== undefined && turn <= state.currentTurn) return
     state.currentTurn = turn
     state.updatedAt = Date.now()
-    this.notify()
+    this.notify(sessionId)
   }
 
   /** 实时路径：开始一次新思考（每次 llm/stream 调用 = 一个新 think）。 */
@@ -155,8 +165,7 @@ export class ThinkStateStore {
     s.inSplice = false
     s.thinkingTokens = 0
     s.updatedAt = Date.now()
-    this.lastActiveSessionId = sessionId
-    this.notify()
+    this.notify(sessionId)
     return { state: s, think }
   }
 
@@ -168,7 +177,7 @@ export class ThinkStateStore {
     if (!think) {
       think = { id: thinkId, active: false, tokens: 0, startedAt: Date.now(), segments: [] }
       s.thinks.push(think)
-      this.notify()
+      this.notify(sessionId)
     }
     return { state: s, think }
   }
@@ -181,7 +190,7 @@ export class ThinkStateStore {
     if (think) think.active = false
     s.active = s.thinks.some((t) => t.active)
     s.updatedAt = Date.now()
-    this.notify()
+    this.notify(sessionId)
   }
 
   /** 推入一个分段到指定 think。 */
@@ -190,7 +199,7 @@ export class ThinkStateStore {
     if (!think) return
     think.segments.push(segment)
     state.updatedAt = Date.now()
-    this.notify()
+    this.notify(state.sessionId)
   }
 
   /** 过期清理（空闲超过 TTL）；返回移除数。 */
@@ -202,14 +211,14 @@ export class ThinkStateStore {
       // 有思考总结段的会话保留更久（回看历史消息仍能显示总结条）
       const hasSegs = s.thinks.some((t) => t.segments.length > 0)
       if (idle > (hasSegs ? TTL_SEG_MS : TTL_MS)) {
-        this.map.delete(k)
+        this.evict(k)
         removed++
       }
     }
     return removed
   }
 
-  /** 供 Client 轮询的纯 JSON 视图（剥离内部 hashes/nextThinkId）。 */
+  /** 供 Client 轮询的纯 JSON 视图（剥离内部 nextThinkId）。 */
   view(sessionId: string): Omit<ThinkState, 'nextThinkId'> | undefined {
     const s = this.get(sessionId)
     if (!s) return undefined
@@ -224,16 +233,12 @@ export class ThinkStateStore {
     }
   }
 
-  get lastActive(): string | undefined {
-    return this.lastActiveSessionId
-  }
-
   /** 导出全部会话（持久化写盘；剥离运行时字段，保留 think 分组与段）。
    *  只导出**有段输出**的会话——与 loadAll 的恢复规则对称，
    *  文件只含真正的思考总结（空段会话不占磁盘）。 */
-  exportAll(): SavedThinkState[] {
+  exportAll(sessionId?: string): SavedThinkState[] {
     const out: SavedThinkState[] = []
-    for (const s of this.map.values()) {
+    for (const s of sessionId === undefined ? this.map.values() : [this.map.get(sessionId)].filter((s): s is ThinkState => !!s)) {
       const hasSegs = s.thinks.some((t) => t.segments && t.segments.length > 0)
       if (!hasSegs) continue
       out.push({
@@ -295,6 +300,7 @@ export class ThinkStateStore {
         used.add(t.id)
       }
       s.thinks = restored.concat(s.thinks)
+      this.revisions.set(rec.sessionId, ++this.revision)
     }
   }
 

@@ -15,24 +15,6 @@ export const DEFAULT_CLASSIFIER: ThinkClassifier = (chunk: unknown): string | nu
   return null
 }
 
-/** 块类型常量（探测确认）：block-start 的 blockType 取值。 */
-export const BLOCK_TYPES = {
-  reasoning: 'reasoning',
-  text: 'text',
-  toolCall: 'tool-call',
-} as const
-
-/** chunk.type 常量（探测确认）。 */
-export const CHUNK_TYPES = {
-  blockStart: 'block-start',
-  reasoningDelta: 'reasoning-delta',
-  textDelta: 'text-delta',
-  toolCallDelta: 'tool-call-delta',
-  blockEnd: 'block-end',
-  usage: 'usage',
-  finish: 'finish',
-} as const
-
 /** CJK/全角字符集（token 估算用）。 */
 export const CJK_RE = /[\u4e00-\u9fff\u3400-\u4dbf\u3040-\u30ff\uac00-\ud7af]/
 
@@ -65,8 +47,6 @@ export function estimateTokens(text: string): number {
 export interface DetectOptions {
   /** 长思考判定阈值（thinking tokens）。 */
   thinkThresholdTokens?: number
-  /** 是否只处理带 sessionId 的请求（过滤子代理/标题生成等旁路流）。 */
-  filterNonAgentLoop?: boolean
 }
 
 export interface DetectHooks {

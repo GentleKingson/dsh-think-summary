@@ -37,3 +37,9 @@
 此前仅按 HTTP/IPC 分类把 Desktop 排除在外不准确。rc.3 `apps/desktop/src/main.ts` 在 `dsh-app://app` 下将插件/API 请求交给 `web-document.ts` 的 `forwardWebRequest`；该函数拒绝其他 Origin，然后移除 Host/Origin/Cookie/Fetch Metadata 并附加壳层持有的 Host cookie。`apps/desktop-host/src/index.ts` 使用 Web profile 启动 `127.0.0.1` 随机端口。客户端 `platform: web` 在 Desktop 内同样适用。
 
 因此当前插件无需修改通信实现即可通过 Desktop Host/转发集成测试。此结论不等同于 macOS/Windows 原生窗口、安装器、登录或自动升级的实机验收。
+
+## 历史存储与回归更新
+
+当前历史改为按会话 version 2 文件，按需恢复并只写脏会话；旧 version 1 单文件迁移后保留 `.v1.bak`。内存空闲缓存与非哈希 ETag 的边界见 README。保留旧历史中 `kind: self` 的显示兼容，但不再生成该类型。删除有碰撞风险的段文本哈希去重，重复终态消息仍按 turn/step 幂等处理。
+
+新增 Chromium 真实 React/bundle 行为测试，CI 的构建和 Node 回归覆盖 Linux、Windows、macOS。浏览器和官方 Desktop 转发检查仅在 Linux 运行；不等同于原生 Electron 实机验收。

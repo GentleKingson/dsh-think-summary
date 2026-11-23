@@ -15,6 +15,8 @@ const clientDir = join(root, 'src', 'client')
 
 let building = false
 let pending = false
+let child
+let stopping = false
 
 function rebuild() {
   if (building) {
@@ -22,14 +24,15 @@ function rebuild() {
     return
   }
   building = true
-  const child = spawn(process.execPath, [join(root, 'scripts', 'build-client.mjs')], {
+  child = spawn(process.execPath, [join(root, 'scripts', 'build-client.mjs')], {
     cwd: root,
     stdio: 'inherit',
   })
+  child.on('error', () => { console.error('[watch-client] build could not start'); process.exitCode = 1; watcher.close() })
   child.on('exit', (code) => {
     building = false
     console.log(`[watch-client] build ${code === 0 ? 'ok' : 'FAILED (exit ' + code + ')'} @ ${new Date().toLocaleTimeString()}`)
-    if (pending) {
+    if (!stopping && pending) {
       pending = false
       rebuild()
     }
@@ -37,9 +40,14 @@ function rebuild() {
 }
 
 console.log(`[watch-client] watching ${clientDir} ...`)
-watch(clientDir, { persistent: true }, (_event, filename) => {
+const watcher = watch(clientDir, { persistent: true }, (_event, filename) => {
   if (filename && filename.endsWith('.js')) {
     console.log(`[watch-client] change: ${filename}`)
     rebuild()
   }
 })
+
+rebuild()
+function stop() { stopping = true; watcher.close(); child?.kill('SIGTERM') }
+process.on('SIGINT', stop)
+process.on('SIGTERM', stop)

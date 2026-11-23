@@ -1,3 +1,6 @@
+> **历史归档：0.1.x 设计与探测记录，不代表当前实现。**
+> 设置卡、设置桥、自产小结、可选裁剪策略及 state 级哈希去重已移除。当前行为以 [README](../README.md) 和 [rc.3 兼容性说明](compatibility-rc3.md) 为准。文中的“已实现”仅描述当时版本。
+
 # probe-notes.md — 运行时探测结论
 
 探测方式：会话内动态 Cordis 插件（thkp-1）包住 `llm/stream` 与 `session/event`，

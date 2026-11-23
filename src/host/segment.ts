@@ -13,7 +13,7 @@
  *
  * 切点：双阈值（min 后可切，等边界信号；max 强制切，回溯最近句末/行末）；
  * 边界信号切在行前（边界行进下一段）；canCut 门控保留阈值前缓冲；
- * flush 兜底（< MIN_SEGMENT_FLOOR 丢弃）；段哈希去重（层内 + state 级）。
+ * flush 兜底（< MIN_SEGMENT_FLOOR 丢弃）。
  */
 import { countRaw, estimateTokens, rawToTokens, type RawCount } from './detect.js'
 import { FENCE_RE, classifyLine, isBoundaryLine, analyzeMeta, type SegmentMeta } from './mdline.js'
@@ -51,13 +51,6 @@ export interface SegmentPiece {
 /** flush 时小尾巴下限（token）：低于此值不产出段（design §5 硬规则④）。 */
 export const MIN_SEGMENT_FLOOR = 64
 
-/** 哈希去重（FNV-1a 简化）。 */
-export function hashText(s: string): string {
-  let h = 5381
-  for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0
-  return String(h >>> 0)
-}
-
 /** 未完成行缓冲的 token 拆分阈值：估算 token 超过此值（max 一半）且非围栏/表格行时按句末标点拆出前部句子。 */
 function pendingSplitTokens(max: number): number {
   return Math.max(64, max * 0.5)
@@ -83,7 +76,6 @@ export class Segmenter {
   private readonly onMeta: ((info: { kind: 'code' | 'table'; lines: number; lang?: string }) => void) | undefined
   private readonly codeMode: 'ignore' | 'keep'
   private readonly tableMode: 'ignore' | 'keep'
-  private lastHash = ''
   // Only complete pieces produced before the long-thinking threshold opens.
   private deferred: Parameters<SegmentSink['onSegment']>[] = []
   private ignoredTableContinuation = false
@@ -312,9 +304,6 @@ export class Segmenter {
     this.cjk = r.cjk
     this.other = r.other
     if (!text) return // 空段不吞忽略 token（pendingIgnoreTokens 留给下一段）
-    const h = hashText(text)
-    if (h === this.lastHash) return
-    this.lastHash = h
     const tokens = estimateTokens(text)
     const rawTokens = tokens + this.pendingIgnoreTokens
     this.pendingIgnoreTokens = 0
@@ -415,7 +404,6 @@ export class Segmenter {
     this.pendingIgnoreTokens = 0
     this.inCode = false
     this.inTable = false
-    this.lastHash = ''
   }
 }
 

@@ -1,7 +1,7 @@
 /**
  * dsh-think-summary web client 入口。
  * 纯 JS（无 JSX/TS/import），由 scripts/build-client.mjs 与同目录模块
- * （constants/utils/styles/settings/tail/dock）按序拼接为单个 ModuleLoader bundle；
+ * （constants/utils/styles/tail/dock/views）按序拼接为单个 ModuleLoader bundle；
  * React 来自 bundle 包裹层的 `require("react")`。
  *
  * 失败策略：任何 DOM/网络异常只记录，绝不向上抛（web shell 会因插件 apply
@@ -15,7 +15,6 @@ export const inject = ['slots']
 export function apply(ctx) {
   try {
     // 2) 聊天流内：turn 末尾的思考总结条（turn 级槽位，显示该 turn 全部思考分组）
-    //    select 返回值成为组件的 matched prop：传 TurnLocation 对象 + seq
     ctx.slots.inject('conversation.chat.turnTail', () => ctx.slots.register(
       {
         name: 'conversation.chat.turnTail',

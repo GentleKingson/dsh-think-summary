@@ -25,7 +25,7 @@ export async function apply(ctx: CtxLike, config: LiveConfig = {}) {
   ctx.on('loader/volatile-update', () => {
     if (!getConfig().enabled || !getConfig().refineEnabled) stop()
   })
-  await installPersist(ctx, store, getConfig)
+  await installPersist(ctx, store, getConfig, sid => refine.hasSession(sid), () => refine.dispose())
   installDetect(ctx, store, getConfig, refine)
   installFallback(ctx, store, getConfig, refine)
   installRpc(ctx, store, getConfig)

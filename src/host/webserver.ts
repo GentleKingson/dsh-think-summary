@@ -1,3 +1,4 @@
+import { diagnose } from './diagnostics.js'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { CtxLike } from './ctx.js'
 export type RouteReq = IncomingMessage
@@ -26,7 +27,7 @@ export function whenWebServer(ctx: CtxLike, register: (server: { register(route:
         return result
       } })
       current = server
-    } catch { clear() }
+    } catch { clear(); diagnose('route-register') }
   }
   attempt()
   ctx.on('internal/service', (name: string) => { if (name === 'webServer') attempt() })

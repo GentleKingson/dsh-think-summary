@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { RefineQueue, headTailTrim, trimToTokens } from '../lib/host/summarize/refine.js'
+import { RefineQueue, headTailTrim } from '../lib/host/summarize/refine.js'
 import { estimateTokens } from '../lib/host/detect.js'
 import { task, until, delay } from './helpers.mjs'
 
@@ -87,7 +87,7 @@ test('provider errors and empty outputs retain heuristic without leaking error d
 })
 
 test('token trimming obeys small budgets for mixed text', () => {
-  for (const budget of [1, 8, 64, 128]) for (const trim of [headTailTrim, trimToTokens]) {
+  for (const budget of [1, 8, 64, 128]) for (const trim of [headTailTrim]) {
     assert.ok(estimateTokens(trim('中文 hello '.repeat(200), budget)) <= budget)
   }
 })

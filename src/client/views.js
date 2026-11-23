@@ -59,29 +59,29 @@ function makeThinkSummaryView() {
     // 首次渲染（列表出现）强制滚到底部，此后由 scroll 事件接管
     const firstRunRef = React.useRef(true)
 
-    // 滚动：scroll 事件更新 atBottom；数据更新时仅在底部才滚底；
-    // 首次挂载强制滚底（否则初始 update() 会把 atBottom 算成 false，
-    // 内容停在顶部——用户看到的"总是滚到顶部"）
+    React.useLayoutEffect(() => {
+      firstRunRef.current = true
+      atBottomRef.current = true
+    }, [sessionId])
+
+    // Decide using the scroll position before the DOM update, not the new height.
+    React.useLayoutEffect(() => {
+      const scroller = findScroller(listRef.current)
+      if (!scroller) return
+      if (firstRunRef.current || atBottomRef.current) scroller.scrollTop = scroller.scrollHeight
+      firstRunRef.current = false
+    }, [state, enabled, sessionId])
+
     React.useEffect(() => {
-      const el = listRef.current
-      if (!el) return undefined
-      const scroller = findScroller(el)
+      const scroller = findScroller(listRef.current)
       if (!scroller) return undefined
       const update = () => {
         const floor = Math.max(0, scroller.scrollHeight - scroller.clientHeight)
         atBottomRef.current = floor - scroller.scrollTop <= 25
       }
       scroller.addEventListener('scroll', update, { passive: true })
-      if (firstRunRef.current) {
-        firstRunRef.current = false
-        atBottomRef.current = true
-        scroller.scrollTop = scroller.scrollHeight // 初始滚到底部
-      } else {
-        update()
-        if (atBottomRef.current) scroller.scrollTop = scroller.scrollHeight // 跟随滚底
-      }
       return () => scroller.removeEventListener('scroll', update)
-    }, [state])
+    }, [state, sessionId, enabled])
 
     const thinks = (state && state.thinks) || []
     // 只显示有输出的思考；正序（最新的在底部）

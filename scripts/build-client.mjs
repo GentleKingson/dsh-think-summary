@@ -3,7 +3,7 @@
  * 包成 DSH web 模块格式（window.__ModuleLoader__.load({ id, factory })），
  * 输出到 lib/client.js。与 dsh-web-ui 生态的 tsdown 产物同构，但零依赖、可复现。
  *
- * 模块顺序（依赖序）：constants → utils → styles → settings → tail → dock → index。
+ * 模块顺序（依赖序）：constants → utils → styles → tail → dock → views → index。
  * 变换：剥离 ESM `export` 关键字（仅 index.js 有导出），追加 `exports.x = x`；
  * 提供 `React` 自由变量（require("react")）供源码使用。
  */

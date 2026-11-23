@@ -45,10 +45,12 @@
     "watch": "tsc -p tsconfig.json --watch",
     "watch:client": "node scripts/watch-client.mjs",
     "watch:all": "node scripts/watch-all.mjs",
-    "test": "npm run build && node --test tests/*.test.mjs && node scripts/seg-check.mjs && node scripts/order-check.mjs",
+    "test": "npm run build && npm run test:unit",
     "test:desktop": "node scripts/desktop-check.mjs",
     "test:live": "node scripts/live-check.mjs",
-    "test:live-cancel": "node scripts/live-cancel-check.mjs"
+    "test:live-cancel": "node scripts/live-cancel-check.mjs",
+    "test:unit": "node --test tests/*.test.mjs && node scripts/seg-check.mjs",
+    "test:browser": "playwright test"
   },
   "keywords": [
     "dsh",
@@ -76,7 +78,10 @@
     "@deepseek-ai/dsh-llm": "0.2.2-rc.3",
     "@deepseek-ai/dsh-llm-deepseek": "0.2.2-rc.3",
     "@deepseek-ai/dsh-settings": "0.2.2-rc.3",
+    "@playwright/test": "^1.65.1",
     "@types/node": "^26.2.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
     "typescript": "^5.5.0"
   },
   "engines": {

@@ -157,3 +157,14 @@ test('ignored table cell spanning several slices never reaches refinement', asyn
   const [segment] = store.get('s').thinks[0].segments
   assert.ok(segment.rawTokens > 50_000)
 })
+
+for (const suffixes of [['Aa', 'B@'], ['Aa', 'Aa']]) {
+  test('retained adjacent blocks preserve distinct positions: ' + suffixes.join('/'), async () => {
+    const ctx = context(), store = new ThinkStateStore()
+    installDetect(ctx, store, () => resolveConfig({ thinkThresholdTokens: 100, codeBlockMode: 'keep-skip' }))
+    const wrap = ctx.events.get('llm/stream')[0]
+    const text = suffixes.map(suffix => '```js\n' + '中'.repeat(100) + suffix + '\n```\n').join('')
+    await collect(wrap({ sessionId: 's' }, () => (async function* () { yield { type: 'reasoning-delta', text } })()))
+    assert.equal(store.get('s').thinks[0].segments.length, 2)
+  })
+}

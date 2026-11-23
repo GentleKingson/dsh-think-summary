@@ -9,6 +9,7 @@ import LlmRuntime, { BlockAssembler, createToolResultMessage } from '@deepseek-a
 import { DeepSeekAdapter, resolveAdapterOptions } from '@deepseek-ai/dsh-llm-deepseek'
 import WebServer from '@deepseek-ai/dsh-host-webserver'
 import * as plugin from '../lib/index.js'
+import { sessionFile } from '../lib/host/persist.js'
 import { testHostCookie } from './test-host-cookie.mjs'
 
 const keyName = process.env.DSH_LIVE_KEY_ENV || 'api_key'
@@ -97,8 +98,10 @@ try {
   assert.ok(report.toolAnswer.includes('DSH_RC3_TOOL_OK'))
   report.checks.push('Real tool-call -> local verification_echo -> real final answer succeeded')
   await instance.dispose()
-  const saved = JSON.parse(await readFile(join(home, 'dsh-think-summary.json'), 'utf8'))
-  assert.ok(saved.sessions.some(s => s.sessionId === sid && s.thinks.some(t => t.segments.some(seg => seg.refined))))
+  const saved = JSON.parse(await readFile(sessionFile(join(home, 'dsh-think-summary', 'sessions'), sid), 'utf8'))
+  assert.equal(saved.version, 2)
+  assert.equal(saved.session.sessionId, sid)
+  assert.ok(saved.session.thinks.some(t => t.segments.some(seg => seg.refined)))
   report.checks.push('Final refined state persisted on unload')
   const restored = ctx.plugin(plugin, { refineEnabled: false, persistEnabled: true }); await restored
   assert.ok((await state()).thinks.some(t => t.segments.some(s => s.refined)))

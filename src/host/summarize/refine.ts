@@ -41,15 +41,6 @@ export interface LlmLike {
   stream(options: GenerateOptions): AsyncIterable<StreamChunk>
 }
 
-/** 裁剪为尾部预算 token（从前往后丢，保留结尾）。 */
-export function trimToTokens(text: string, budget: number): string {
-  let s = text
-  while (estimateTokens(s) > budget && s.length > 0) {
-    s = s.slice(Math.ceil(s.length * 0.25))
-  }
-  return s
-}
-
 /**
  * 头尾裁剪（docs/segment-optimization.md §4.C）：保留头部（主题，常在前 20%）
  * 与尾部（结论），丢中段。比"只保尾部"在同等预算下信息量更高。
@@ -122,6 +113,7 @@ export class RefineQueue {
     }
   }
   async dispose() { this.closed = true; this.cancelAll(); await Promise.allSettled(this.jobs) }
+  hasSession(sid: string) { return this.queue.some(t => t.sessionId === sid) || [...this.active.keys()].some(t => t.sessionId === sid) }
   get pending() { return this.queue.length }
   get running() { return this.active.size }
   private pump() {

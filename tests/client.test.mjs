@@ -64,3 +64,22 @@ test('client bundle registers rc.3 list slots with ids and direct turn owner pro
   }
   assert.equal(registrations[0].options.name, 'conversation.chat.turnTail')
 })
+
+test('304 retains the snapshot and does not notify or parse JSON', async () => {
+  let calls = 0
+  const values = []
+  const c = await client(async (url, options) => {
+    if (calls++) {
+      assert.equal(options.headers['If-None-Match'], 'revision-1')
+      return { status: 304, json() { assert.fail('304 must not parse') } }
+    }
+    return { ok: true, headers: { get: () => 'revision-1' }, async json() { return { state: { thinks: [], active: false } } } }
+  })
+  const unsubscribe = c.subscribe('s', v => values.push(v)); await tick()
+  const snapshot = values.at(-1), count = values.length
+  const [id, timer] = [...c.timers].find(([, t]) => t.ms === 5000)
+  c.timers.delete(id); await timer.fn()
+  assert.equal(values.length, count); assert.equal(values.at(-1), snapshot)
+  assert.ok([...c.timers.values()].some(t => t.ms === 5000))
+  unsubscribe()
+})

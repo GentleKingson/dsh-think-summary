@@ -15,3 +15,7 @@ pnpm-lock.yaml
 # temp (commit message drafts etc.)
 *.tmp
 COMMIT_MSG*
+
+# browser test artifacts
+playwright-report/
+test-results/

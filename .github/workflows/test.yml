@@ -2,9 +2,15 @@ name: regression
 on:
   push:
   pull_request:
+permissions:
+  contents: read
 jobs:
   test:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -12,14 +18,20 @@ jobs:
           node-version: '24'
           cache: npm
       - run: npm ci --ignore-scripts
-      - run: npm run typecheck
-      - run: npm test
-      - uses: actions/checkout@v4
+      - run: npm run build
+      - run: npm run test:unit
+      - if: runner.os == 'Linux'
+        run: npx playwright install --with-deps chromium
+      - if: runner.os == 'Linux'
+        run: npm run test:browser
+      - if: runner.os == 'Linux'
+        uses: actions/checkout@v4
         with:
           repository: deepseek-ai/deepseek-harness
           ref: 38a6a5c965aa99ab525161efb7cc5cf1fe62fced
           path: .test-host-source
-      - run: npm run test:desktop
+      - if: runner.os == 'Linux'
+        run: npm run test:desktop
         env:
           DSH_OFFICIAL_SOURCE: ${{ github.workspace }}/.test-host-source
-      - run: npm pack --dry-run
+      - run: npm pack --dry-run --ignore-scripts

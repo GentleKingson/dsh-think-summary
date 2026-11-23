@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import type { ThinkStateStore } from './state.js'
 import { whenWebServer, writeJson, readJsonBody, guard, HttpError } from './webserver.js'
 import type { CtxLike } from './ctx.js'
@@ -25,12 +26,19 @@ function authorize(ctx: CtxLike, req: RouteReq, sessionId?: string) {
 }
 
 export function installRpc(ctx: CtxLike, store: ThinkStateStore, getOptions: () => ThinkSummaryConfig): void {
+  const epoch = randomUUID()
   whenWebServer(ctx, server => {
-    server.register({ kind: 'exact', path: '/api/think-summary/state', handler(req, res) {
+    server.register({ kind: 'exact', path: '/api/think-summary/state', async handler(req, res) {
       if (!guard(req, res, 'GET')) return
       const sid = new URL(req.url ?? '/', 'http://localhost').searchParams.get('sessionId')
       if (!sid || sid.length > 256) throw new HttpError(400, 'sessionId required')
       authorize(ctx, req, sid)
+      await store.ensureLoaded(sid)
+      const etag = `"${epoch}:${store.getRevision(sid)}:${getOptions().enabled !== false}:${store.paused}"`
+      res.setHeader('etag', etag)
+      if (req.headers['if-none-match'] === etag) {
+        res.writeHead(304, { 'cache-control': 'no-store' }); res.end(); return
+      }
       writeJson(res, 200, { enabled: getOptions().enabled !== false, paused: store.paused, state: store.view(sid) ?? null })
     } })
     server.register({ kind: 'exact', path: '/api/think-summary/pause', async handler(req, res) {
