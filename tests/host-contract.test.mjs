@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { Context } from '@deepseek-ai/cordis'
-import LlmRuntime, { LlmAdapter } from '@deepseek-ai/dsh-llm'
+import LlmRuntime, { LlmAdapter, LlmError } from '@deepseek-ai/dsh-llm'
 import * as plugin from '../lib/index.js'
 import { Config, resolveConfig } from '../lib/host/config.js'
 import { installDetect } from '../lib/host/stream.js'
@@ -9,7 +9,7 @@ import { ThinkStateStore } from '../lib/host/state.js'
 import { RefineQueue } from '../lib/host/summarize/refine.js'
 import { task, until } from './helpers.mjs'
 
-test('published rc.3 LlmRuntime waterfall accepts plugin and isolated refinement requests', async () => {
+test('published LlmRuntime waterfall accepts plugin and isolated refinement requests', async () => {
   const ctx = new Context()
   await ctx.plugin(LlmRuntime)
   const calls = []
@@ -36,6 +36,40 @@ test('published rc.3 LlmRuntime waterfall accepts plugin and isolated refinement
   queue.dispose()
 })
 
+test('LlmRuntime preserves refusal usage and error while ending thinking and cancelling refinement', async t => {
+  const ctx = new Context()
+  const fiber = ctx.plugin(LlmRuntime)
+  await fiber
+  t.after(() => fiber.dispose())
+  const usage = { type: 'usage', usage: { inputTokens: 10, outputTokens: 500 } }
+  class RefusingAdapter extends LlmAdapter {
+    async *stream() {
+      yield { type: 'reasoning-delta', text: '分析问题并给出结论。'.repeat(80) }
+      yield usage
+      throw new LlmError('Request refused', 'CONTENT_REFUSED')
+    }
+  }
+  ctx.llm.registerAdapter(['provider'], new RefusingAdapter())
+  const store = new ThinkStateStore()
+  const queued = [], cancelled = []
+  const options = () => resolveConfig({ thinkThresholdTokens: 100, segmentMinTokens: 100, segmentMaxTokens: 200 })
+  installDetect(ctx, store, options, {
+    enqueue(task) { queued.push(task) },
+    cancelThink(sessionId, thinkId) { cancelled.push([sessionId, thinkId]) },
+  })
+  const chunks = await Array.fromAsync(ctx.llm.stream({
+    provider: 'provider', model: 'session-model', sessionId: 'refused', messages: [],
+  }))
+  assert.deepEqual(chunks.map(chunk => chunk.type), ['reasoning-delta', 'usage', 'finish'])
+  assert.deepEqual(chunks[1], usage)
+  assert.equal(chunks[2].reason.kind, 'error')
+  assert.equal(chunks[2].reason.failure.code, 'CONTENT_REFUSED')
+  const state = store.get('refused')
+  assert.equal(state.active, false)
+  assert.ok(queued.length > 0)
+  assert.deepEqual(cancelled, [['refused', state.thinks[0].id]])
+})
+
 test('real Cordis loads the exported volatile Config and disposes all HTTP routes', async () => {
   const ctx = new Context(), routes = new Map()
   ctx.provide('webServer', { register(route) { routes.set(route.path, route); return () => routes.delete(route.path) } })
@@ -57,7 +91,7 @@ test('schema enforces bounds; live values are resolved on each read', () => {
   assert.equal(resolveConfig(config).refineOutputTokens, 256)
 })
 
-test('rc.3 Loader updates volatile configuration without replacing the plugin instance', async () => {
+test('Loader updates volatile configuration without replacing the plugin instance', async () => {
   const { default: Loader } = await import('@deepseek-ai/cordis-plugin-loader')
   const { default: Settings } = await import('@deepseek-ai/dsh-settings')
   const { mkdtemp } = await import('node:fs/promises')

@@ -95,7 +95,8 @@ function makeThinkSummaryView() {
     const open = (id) => (openMap[JSON.stringify([sessionId, id])] ?? true)
 
     const thinkCards = visible.map((t) => {
-      const segs = (t.segments || []).map((s) =>
+      const expanded = open(t.id)
+      const segs = expanded ? t.segments.map((s) =>
         React.createElement(
           'div', { key: t.id + ':' + s.index, className: 'ts-view-seg' },
           React.createElement(
@@ -105,9 +106,8 @@ function makeThinkSummaryView() {
           ),
           React.createElement('div', { className: 'ts-view-seg-text' }, s.summary),
         ),
-      )
+      ) : []
       const refinedCount = t.segments.filter((x) => x.refined).length
-      const expanded = open(t.id)
       return React.createElement(
         'div', { key: t.id, className: 'ts-view-card', 'data-open': expanded ? 'true' : 'false' },
         React.createElement(

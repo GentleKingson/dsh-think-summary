@@ -53,7 +53,7 @@ function subscribeThinkState(sessionId, listener) {
   if (!sessionId) { listener({ state: null, enabled: true, paused: false }); return () => {} }
   let entry = thinkSubscriptions.get(sessionId)
   if (!entry) {
-    entry = { listeners: new Set(), value: { state: null, enabled: true, paused: false }, timer: null, controller: null, closed: false, etag: null }
+    entry = { listeners: new Set(), value: { state: null, enabled: true, paused: false }, etag: null, delay: 5000, timer: null, controller: null, closed: false }
     thinkSubscriptions.set(sessionId, entry)
     entry.poll = async () => {
       if (entry.closed || entry.controller || document.hidden) return
@@ -67,15 +67,16 @@ function subscribeThinkState(sessionId, listener) {
         if (!entry.closed) {
           entry.etag = res.headers?.get('etag') || null
           entry.value = { state: json.state || null, enabled: json.enabled !== false, paused: json.paused === true }
+          const state = entry.value.state
+          const pending = state?.thinks?.some(t => t.segments.some(s => !s.refined && !s.skipReason && !s.unrefinedReason))
+          entry.delay = state?.active || pending ? 1500 : 5000
           for (const callback of entry.listeners) callback(entry.value)
         }
       } catch {} finally {
         clearTimeout(timeout)
         entry.controller = null
         if (!entry.closed && !document.hidden) {
-          const state = entry.value.state
-          const pending = state?.thinks?.some(t => t.segments.some(s => !s.refined && !s.skipReason && !s.unrefinedReason))
-          entry.timer = setTimeout(entry.poll, state?.active || pending ? 1500 : 5000)
+          entry.timer = setTimeout(entry.poll, entry.delay)
         }
       }
     }

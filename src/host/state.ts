@@ -239,14 +239,14 @@ export class ThinkStateStore {
   exportAll(sessionId?: string): SavedThinkState[] {
     const out: SavedThinkState[] = []
     for (const s of sessionId === undefined ? this.map.values() : [this.map.get(sessionId)].filter((s): s is ThinkState => !!s)) {
-      const hasSegs = s.thinks.some((t) => t.segments && t.segments.length > 0)
-      if (!hasSegs) continue
-      out.push({
-        sessionId: s.sessionId,
-        currentTurn: s.currentTurn,
-        thinkingTokens: s.thinkingTokens,
-        updatedAt: s.updatedAt,
-        thinks: s.thinks.map((t) => ({
+      if (!s.thinks.some(t => t.segments.length > 0)) continue
+      const latest = s.thinks.at(-1)
+      const thinks: ThinkGroup[] = []
+      for (const t of s.thinks) {
+        // The dock still uses empty groups for the current turn and for legacy progress.
+        const showsProgress = s.currentTurn === undefined ? t === latest : t.turn === s.currentTurn
+        if (!t.segments.length && !t.active && !showsProgress) continue
+        thinks.push({
           id: t.id,
           active: false, // 重启后无活跃流
           tokens: t.tokens,
@@ -254,7 +254,14 @@ export class ThinkStateStore {
           turn: t.turn,
           step: t.step,
           segments: t.segments.filter(seg => seg && typeof seg.summary === 'string' && Number.isInteger(seg.index)).map(seg => ({ ...seg })),
-        })),
+        })
+      }
+      out.push({
+        sessionId: s.sessionId,
+        currentTurn: s.currentTurn,
+        thinkingTokens: s.thinkingTokens,
+        updatedAt: s.updatedAt,
+        thinks,
         nextThinkId: s.nextThinkId,
       })
     }

@@ -20,7 +20,7 @@ test('all session surfaces share one fetch, continue refinement updates, stop in
   const calls = [], snapshots = []
   const c = await client(async (url, options) => {
     calls.push({ url, options })
-    return { ok: true, async json() { return { enabled: true, state: { active: false, thinks: [{ segments: [{ refined: calls.length > 1 }] }] } } } }
+    return { ok: true, headers: new Headers(), async json() { return { enabled: true, state: { active: false, thinks: [{ segments: [{ refined: calls.length > 1 }] }] } } } }
   })
   const unsubscribers = Array.from({ length: 30 }, () => c.subscribe('session', value => snapshots.push(value)))
   await tick()
@@ -49,6 +49,68 @@ test('session subscriptions are isolated and in-flight fetch aborts when last su
   a(); assert.equal(signals[0].aborted, true); assert.equal(signals[1].aborted, false)
   b(); await tick()
   assert.equal(c.timers.size, 0)
+})
+
+test('conditional polling keeps its snapshot and schedule on 304', async () => {
+  const requests = [], snapshots = []
+  const c = await client(async (_url, options) => {
+    requests.push(options.headers)
+    if (requests.length === 2) return new Response(null, { status: 304 })
+    return Response.json({ state: { active: requests.length === 1, thinks: [] } }, {
+      headers: { etag: requests.length === 1 ? '"active"' : '"idle"' },
+    })
+  })
+  const unsubscribe = c.subscribe('session', value => snapshots.push(value))
+  const poll = async delay => {
+    const [key, timer] = [...c.timers].find(([, timer]) => timer.ms === delay)
+    c.timers.delete(key)
+    await timer.fn()
+  }
+  await tick()
+  const active = snapshots.at(-1)
+  assert.equal(active.state.active, true)
+  await poll(1500)
+  assert.equal(snapshots.length, 2)
+  assert.equal(snapshots.at(-1), active)
+  assert.equal(requests[1]['If-None-Match'], '"active"')
+  await poll(1500)
+  assert.equal(snapshots.at(-1).state.active, false)
+  assert.ok([...c.timers.values()].some(timer => timer.ms === 5000))
+  unsubscribe()
+})
+
+test('folded summary surfaces skip segment elements and render them on expansion', async () => {
+  const segment = { index: 0, summary: 'Summary', tokens: 20, refined: true }
+  const state = { sessionId: 's', currentTurn: 1, thinks: [{ id: 's1', turn: 1, segments: [segment] }] }
+  let expanded = false
+  const elements = []
+  const sandbox = vm.createContext({
+    state,
+    React: {
+      createElement(type, props, ...children) { elements.push({ type, props, children }) },
+      useState(initial) { return [typeof initial === 'function' ? { '["s","s1"]': expanded } : expanded, () => {}] },
+      useLayoutEffect() {}, useEffect() {}, useRef: () => ({ current: null }),
+    },
+  })
+  const code = await Promise.all(['utils', 'tail', 'views', 'dock'].map(name =>
+    readFile(new URL(`../src/client/${name}.js`, import.meta.url), 'utf8'),
+  ))
+  vm.runInContext(code.join('\n') + '\nuseThinkState = () => ({ state, enabled: true, paused: false })', sandbox)
+  for (const [factory, segmentClass] of [
+    ['makeThinkTail', 'ts-tail-seg'], ['makeThinkSummaryView', 'ts-view-seg'], ['makeInputDock', 'ts-dock-seg'],
+  ]) {
+    const render = vm.runInContext(`${factory}()`, sandbox)
+    const props = { sessionId: 's', turn: { turn: 1 } }
+    const renderedSegments = () => elements.filter(e => e.props?.className === segmentClass).length
+    expanded = false
+    elements.length = 0
+    render(props)
+    assert.equal(renderedSegments(), 0, factory)
+    expanded = true
+    elements.length = 0
+    render(props)
+    assert.equal(renderedSegments(), 1, factory)
+  }
 })
 
 test('client bundle registers rc.3 list slots with ids and direct turn owner props', async () => {

@@ -57,7 +57,7 @@ function makeInputDock() {
 
     const segments = visible.flatMap((t) => t.segments)
     const refinedCount = segments.filter((s) => s.refined).length
-    const body = visible.length ? visible.flatMap((t, i) =>
+    const body = open && (visible.length ? visible.flatMap((t, i) =>
       t.segments.map((s) =>
         React.createElement(
           'div', {
@@ -75,7 +75,7 @@ function makeInputDock() {
       )
     ) : React.createElement('div', { className: 'ts-dock-placeholder' },
       active ? '正在积累思考…' : '本轮暂无分段摘要',
-    )
+    ))
 
     return React.createElement(
       'div', { className: 'ts-dock', 'data-open': open ? 'true' : 'false' },

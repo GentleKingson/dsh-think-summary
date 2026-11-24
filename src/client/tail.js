@@ -26,7 +26,7 @@ function makeThinkTail() {
     const totalRefined = thinks.reduce((n, t) => n + t.segments.filter((s) => s.refined).length, 0)
 
     // 按 think 分组：多思考时每组标注 step；单思考保持紧凑
-    const groups = thinks.map((think) => {
+    const groups = open ? thinks.map((think) => {
       const segEls = think.segments.map((s) =>
         React.createElement(
           'div', { key: think.id + ':' + s.index, className: 'ts-tail-seg' },
@@ -48,7 +48,7 @@ function makeThinkTail() {
           : null,
         ...segEls,
       )
-    })
+    }) : []
 
     return React.createElement(
       'div', { className: 'ts-tail', 'data-open': open ? 'true' : 'false' },

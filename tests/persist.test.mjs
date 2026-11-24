@@ -7,6 +7,35 @@ import { ThinkStateStore } from '../lib/host/state.js'
 import { installPersist, sessionFile } from '../lib/host/persist.js'
 import { context } from './helpers.mjs'
 
+test('history export drops old empty groups while retaining current and legacy progress', () => {
+  const store = new ThinkStateStore()
+  const append = (sid, turn, summary, active = false) => {
+    if (turn !== undefined) store.startTurn(sid, turn)
+    const { state, think } = store.beginThink(sid)
+    if (summary) store.pushSegment(state, think.id, { index: 0, summary, tokens: 100, refined: true, ts: 1 })
+    if (!active) store.endThink(sid, think.id)
+    return think.id
+  }
+
+  const summarized = append('turns', 1, '已总结')
+  append('turns', 2)
+  const active = append('turns', 2, undefined, true)
+  const current = append('turns', 3)
+  const legacySummary = append('legacy', undefined, '已有摘要')
+  append('legacy')
+  const legacyLatest = append('legacy')
+
+  const saved = store.exportAll()
+  assert.deepEqual(saved[0].thinks.map(t => t.id), [summarized, active, current])
+  assert.deepEqual(saved[1].thinks.map(t => t.id), [legacySummary, legacyLatest])
+  const restored = new ThinkStateStore()
+  restored.loadAll(saved)
+  assert.equal(restored.get('turns').currentTurn, 3)
+  assert.equal(restored.get('turns').thinks[0].segments[0].summary, '已总结')
+  assert.equal(restored.beginThink('turns').think.id, 's5')
+  assert.equal(restored.beginThink('legacy').think.id, 's4')
+})
+
 async function home(t) {
   const old = process.env.DSH_HOME
   process.env.DSH_HOME = await mkdtemp(join(tmpdir(), 'think-history-'))

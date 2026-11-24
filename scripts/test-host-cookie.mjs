@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import * as Connection from '@deepseek-ai/dsh-client-connection'
 
 // Standalone test hosts have no profile credential store or index page.
-// Use the real rc.3 launch-token exchange with an ephemeral signing secret.
+// Use the host's launch-token exchange with an ephemeral signing secret.
 export async function testHostCookie(ctx) {
   ctx.provide('credentials', { modifyRecord: (_key, update) => update(undefined) })
   await ctx.plugin(Connection)

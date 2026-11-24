@@ -53,8 +53,16 @@ export function installFallback(ctx: CtxLike, store: ThinkStateStore, getOptions
       if (event.type === 'assistant/chunk') steps.open.add(key)
       if (store.untaggedPausedRequests.delete(sid) || store.paused) steps.excluded.add(key)
       const state = store.get(sid)
-      const realtime = state?.thinks.slice().reverse().find(t => t.id.startsWith('s') && t.step === undefined && (t.turn === undefined || t.turn === turn))
-      if (realtime) { realtime.turn = turn; realtime.step = step; store.touch(sid) }
+      if (state) {
+        for (let i = state.thinks.length - 1; i >= 0; i--) {
+          const think = state.thinks[i]!
+          if (think.step !== undefined || !think.id.startsWith('s') || (think.turn !== undefined && think.turn !== turn)) continue
+          think.turn = turn
+          think.step = step
+          store.touch(sid)
+          break
+        }
+      }
       if (event.type !== 'assistant/message') return
       steps.open.delete(key)
       store.sweep()

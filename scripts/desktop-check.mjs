@@ -1,4 +1,4 @@
-/** Opt-in integration against an official dsh-v0.2.2-rc.3 checkout; no copied forwarding implementation. */
+/** Opt-in integration against the official source tag matching the installed WebServer. */
 import assert from 'node:assert/strict'
 import { pathToFileURL } from 'node:url'
 import { join } from 'node:path'
@@ -7,13 +7,17 @@ import { tmpdir } from 'node:os'
 import { execFileSync } from 'node:child_process'
 import { Context } from '@deepseek-ai/cordis'
 import WebServer from '@deepseek-ai/dsh-host-webserver'
+import webServerPackage from '@deepseek-ai/dsh-host-webserver/package.json' with { type: 'json' }
 import * as plugin from '../lib/index.js'
 import { testHostCookie } from './test-host-cookie.mjs'
 
 const root = process.env.DSH_OFFICIAL_SOURCE
-if (!root) throw new Error('Set DSH_OFFICIAL_SOURCE to the official rc.3 checkout')
-const commit = execFileSync('git', ['-C', root, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim()
-assert.equal(commit, '38a6a5c965aa99ab525161efb7cc5cf1fe62fced')
+const hostVersion = webServerPackage.version
+const tag = `dsh-v${hostVersion}`
+if (!root) throw new Error(`Set DSH_OFFICIAL_SOURCE to the official ${tag} checkout`)
+const revision = ref => execFileSync('git', ['-C', root, 'rev-parse', '--verify', ref], { encoding: 'utf8' }).trim()
+const commit = revision('HEAD')
+assert.equal(commit, revision(`refs/tags/${tag}^{commit}`), `Expected the official ${tag} checkout`)
 const { forwardWebRequest } = await import(pathToFileURL(join(root, 'apps/desktop/src/web-document.ts')).href)
 const ctx = new Context()
 const host = ctx.plugin(WebServer, { host: '127.0.0.1', port: 0 })
@@ -30,7 +34,14 @@ try {
   const state = await forward('/api/think-summary/state?sessionId=desktop-test', { headers: { origin: 'dsh-app://app' } })
   assert.equal(state.status, 200)
   assert.equal((await state.json()).enabled, true)
-  checks.push('Desktop custom-scheme GET -> actual rc.3 WebServer -> plugin: 200')
+  checks.push('Desktop custom-scheme GET -> WebServer -> plugin: 200')
+  const etag = state.headers.get('etag')
+  assert.ok(etag)
+  const unchanged = await forward('/api/think-summary/state?sessionId=desktop-test', { headers: { 'if-none-match': etag } })
+  assert.equal(unchanged.status, 304)
+  assert.equal(unchanged.headers.get('etag'), etag)
+  assert.equal(await unchanged.text(), '')
+  checks.push('Desktop conditional state GET: 304 with empty body')
   const pause = await forward('/api/think-summary/pause', { method: 'POST', headers: { origin: 'dsh-app://app', 'content-type': 'application/json', 'sec-fetch-site': 'same-origin' }, body: '{"paused":true}' })
   assert.equal(pause.status, 200)
   assert.equal((await pause.json()).paused, true)
@@ -53,7 +64,10 @@ try {
   const gone = await forward('/api/think-summary/state?sessionId=desktop-test')
   assert.equal(gone.status, 404)
   checks.push('Plugin unload removes Desktop-visible routes: 404')
-  console.log(JSON.stringify({ officialCommit: commit, status: 'passed', checks, scope: 'Real official forwarding code + rc.3 Host; no Electron GUI launched' }, null, 2))
+  console.log(JSON.stringify({
+    hostVersion, officialCommit: commit, status: 'passed', checks,
+    scope: 'Official Desktop forwarder and WebServer integration',
+  }, null, 2))
 } finally {
   await instance.dispose()
   await host.dispose()

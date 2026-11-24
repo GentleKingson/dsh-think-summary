@@ -4,7 +4,7 @@
 
 ## 安装
 
-仓库里的插件版本是 `0.2.0`，对应 DSH `0.2.2-rc.3`。Web 和 Desktop 各用自己的 profile，两个客户端都用就分别安装。先用 Node.js 24.9.0 或更高版本打包一次，生成的文件可供两端安装。
+插件 `0.2.0` 支持 DSH `>=0.2.2-rc.3 <0.2.3-0`，范围覆盖 rc.3 起的所有 0.2.2 候选版及正式版。已验证 rc.3、rc.4 和 rc.5。Web 和 Desktop 各用自己的 profile，两个客户端都用就分别安装。先用 Node.js 24.9.0 或更高版本打包一次，生成的文件可供两端安装。
 
 ```sh
 git clone https://github.com/GentleKingson/dsh-think-summary.git
@@ -38,7 +38,7 @@ dsh --version
 dsh plugin --profile desktop add ./dsh-think-summary-0.2.0.tgz
 ```
 
-重新打开 Desktop 即可。命令行卸载时同样先退出应用，再执行 `dsh plugin --profile desktop remove dsh-think-summary`。桌面 profile 由 Desktop 自带的命令管理。[Desktop 官方说明](https://github.com/deepseek-ai/deepseek-harness/blob/dsh-v0.2.2-rc.3/apps/desktop/README.zh.md#bundled-command-runtime)
+重新打开 Desktop 即可。命令行卸载时同样先退出应用，再执行 `dsh plugin --profile desktop remove dsh-think-summary`。桌面 profile 由 Desktop 自带的命令管理。[Desktop 官方说明](https://github.com/deepseek-ai/deepseek-harness/blob/dsh-v0.2.2-rc.5/apps/desktop/README.zh.md#bundled-command-runtime)
 
 ### 确认安装
 
@@ -46,11 +46,11 @@ dsh plugin --profile desktop add ./dsh-think-summary-0.2.0.tgz
 
 ![输入框上方的分段摘要](assets/screenshots/输入框上方实时思考总结卡片.webp)
 
-Desktop rc.3 已验证宿主加载、客户端文件和官方请求转发。原生窗口的界面仍待实机验收。仅加载 Cordis 宿主端时可以记录摘要。[兼容性说明](docs/compatibility-rc3.md)
+Desktop rc.3、rc.4 和 rc.5 已验证宿主加载、客户端文件和官方请求转发。原生窗口的界面仍待实机验收。仅加载 Cordis 宿主端时可以记录摘要。[rc.3 兼容性记录](docs/compatibility-rc3.md)
 
 ## 设置
 
-使用 rc.3 原生插件配置表单（插件条目 `think-summary`），字段为 volatile，修改后即时读取，无需自建设置桥。分段参数在下一条流生效；关闭精炼或插件会取消待处理精炼。
+使用 DSH 原生插件配置表单（插件条目 `think-summary`），字段为 volatile，修改后即时读取。分段参数在下一条流生效。关闭精炼或插件会取消待处理精炼。
 
 | 字段 | 默认值 | 说明 |
 |---|---|---|
@@ -73,8 +73,8 @@ Desktop rc.3 已验证宿主加载、客户端文件和官方请求转发。原�
 ## 稳定性与资源控制
 
 - 精炼调用标记 `purpose: 'think-summary'`，独立 `AbortSignal`，不携带主会话工具或历史。超时、暂停、关闭、主请求取消、插件卸载均停止对应任务；迟到结果不回写。提供方必须遵守取消信号才能实际终止网络/算力消耗。
-- 实时与兜底共用分段器。兜底读取 rc.3 终态 assistant 消息，无第二份流式原文缓存。未完成行最多保留 65,536 字符，段缓冲最多 200,000 字符；极端大代码/表格保留前部，超限内容只计 token；兜底最多处理 200,000 字符。只有原消息同时标明服务商和模型时才允许精炼。64 token 以下尾段不生成摘要。
-- 同会话的实时面板、历史视图和全部回复条共享一个轮询：活跃/待精炼 1.5 秒，空闲 5 秒；隐藏页面停止请求，卸载取消在途请求。回复条持续接收精炼结果。
+- 实时与兜底共用分段器。兜底直接读取 DSH 终态 assistant 消息，避免重复缓存流式原文。未完成行最多保留 65,536 字符，段缓冲最多 200,000 字符。极端大代码或表格保留前部，超限内容只计 token，兜底最多处理 200,000 字符。只有原消息同时标明服务商和模型时才允许精炼。64 token 以下尾段不生成摘要。
+- 同会话的实时面板、历史视图和全部回复条共享一个轮询。活跃或待精炼时每 1.5 秒请求一次，空闲时每 5 秒请求一次。会话未变化时返回无正文的 `304`，界面复用已有状态。隐藏页面停止请求，卸载取消在途请求。
 - 历史位于 `$DSH_HOME/dsh-think-summary/sessions/`（缺省 `~/.dsh/`），每个会话独立保存为 version 2 文件，文件名由会话 ID 可逆编码而来，兼容大小写不敏感的文件系统。只写发生变化的会话，250ms 合并、异步串行、权限 `0600`、独立临时文件原子替换；token 进度更新不触发写盘。正常卸载先停止精炼，再等待写完。强制杀进程可能丢失最近尚未写入的变更。
 - 启用持久化时自动迁移旧 `$DSH_HOME/dsh-think-summary.json`；已有新文件优先，全部成功后保留旧文件为 `.json.v1.bak`。迁移中断可重试；损坏文件保留并输出脱敏诊断，不自动覆盖。迁移时需要临时读取旧文件全部内容。
 - 历史不自动删除。会话按需读取，空闲会话缓存最多 16 个、序列化数据预算 32MiB；活跃、加载中、待写、有精炼任务的会话不淘汰，因此预算是软上限。关闭持久化时保留内存历史，不执行淘汰。单个超大会话首次读取仍与其大小成正比，本版没有分页。
@@ -89,11 +89,11 @@ Desktop rc.3 已验证宿主加载、客户端文件和官方请求转发。原�
 | GET | `/api/think-summary/state?sessionId=...` | 明确会话的状态，无最近会话回退 |
 | POST | `/api/think-summary/pause` | JSON `{ "paused": true }` |
 
-所有接口使用宿主 Connection 验证身份。受限身份读取摘要需要目标会话的 `think-summary/state` 授权，暂停操作仅限所有者。所有接口校验方法、loopback socket、Host、Origin 和 Fetch Metadata；写接口要求 JSON、16KiB 以内正文和 5 秒读取期限。响应禁用缓存。设置交由宿主原生配置接口处理。Desktop rc.3 使用 `dsh-app://app` 经官方 `forwardWebRequest` 转发至本机 Web Host，已验证 GET、POST 和客户端 bundle 均可通行，无需放宽 Origin 校验。远程 Web 和其他反向代理不在本版支持范围内。
+所有接口使用宿主 Connection 验证身份。受限身份读取摘要需要目标会话的 `think-summary/state` 授权，暂停操作仅限所有者。所有接口校验方法、loopback socket、Host、Origin 和 Fetch Metadata。写接口要求 JSON、16KiB 以内正文和 5 秒读取期限。响应禁用缓存。设置交由宿主原生配置接口处理。Desktop 通过官方 `forwardWebRequest` 将来自 `dsh-app://app` 的 GET、POST 和客户端 bundle 请求转发至本机 Web Host。远程 Web 和其他反向代理不在本版支持范围内。
 
 ## 从 0.1.2 迁移
 
-旧版历史自动迁移并保留备份。降级时可将 `.json.v1.bak` 复制回原 `.json` 文件，但备份不含迁移后新增的摘要；降级前应另行保留新目录。原 `selfSummary` 提示词注入、`filterNonAgentLoop`、`refineTrim`、`refinePrompt` 和归档清理设置已移除；旁路过滤、头尾裁剪与中文提示词成为固定策略。`refineModel=auto` 改为沿用当前模型，移除了按上下文窗口猜测“最小模型”的目录扫描。原始配置中的其余同名字段可放入 rc.3 插件行的 `config`；旧 `settings.yaml` 的迁移由宿主负责，请在原生表单确认有效值。
+旧版历史自动迁移并保留备份。降级时可将 `.json.v1.bak` 复制回原 `.json` 文件，但备份不含迁移后新增的摘要；降级前应另行保留新目录。原 `selfSummary` 提示词注入、`filterNonAgentLoop`、`refineTrim`、`refinePrompt` 和归档清理设置已移除；旁路过滤、头尾裁剪与中文提示词成为固定策略。`refineModel=auto` 改为沿用当前模型，移除了按上下文窗口猜测“最小模型”的目录扫描。原始配置中的其余同名字段可放入 DSH 插件行的 `config`；旧 `settings.yaml` 的迁移由宿主负责，请在原生表单确认有效值。
 
 旧设置桥、模型目录和清理接口已移除。输入框面板不再扫描页面标签文字，随宿主 composer 展示。旧版设计/探测记录只作历史参考，以本 README 与兼容性说明为准。
 
@@ -102,7 +102,7 @@ Desktop rc.3 已验证宿主加载、客户端文件和官方请求转发。原�
 在仓库根目录运行 `npm run build`，然后用 `dsh plugin --profile web add link:.` 链接当前目录。每个 profile 只装一个实例。开发时运行 `npm run watch:all` 自动构建；改客户端后刷新页面，改宿主端后重启 DSH。单独检查类型可运行 `npm run typecheck`。
 
 
-`npm test` 运行真实 rc.3 LLM/Cordis/Loader/Settings 契约测试、队列取消与超时、主流与工具 chunk 透传、持久化恢复、HTTP 防护、共享轮询和分段回归。GitHub Actions 使用 Node 24 与锁定依赖，在 Linux、Windows、macOS 上构建并执行 Node 回归；Linux 另运行 Chromium 组件行为和官方 Desktop 转发测试。构建也完成严格类型检查，每个任务只构建一次。常规测试使用脚本模型，不消耗真实模型 API 额度。另已使用真实 `deepseek-flash` 验证推理分段、中文精炼、工具往返及持久化，见 [实测记录](docs/validation-rc3.md)。
+`npm test` 使用已安装的 DSH 依赖运行 LLM/Cordis/Loader/Settings 契约测试、队列取消与超时、主流与工具 chunk 透传、持久化恢复、HTTP 防护、共享轮询和分段回归。默认开发安装使用 rc.5。GitHub Actions 在 Node 24 上验证 rc.5 的 Linux、Windows 和 macOS 构建及 Node 回归，并在 Linux 上补测 rc.3 和 rc.4。Linux 同时运行 Chromium 组件行为和官方 Desktop 转发测试。构建也完成严格类型检查，每个任务只构建一次。常规测试使用脚本模型，不消耗真实模型 API 额度。另已使用真实 `deepseek-flash` 验证推理分段、中文精炼、工具往返及持久化，见 [rc.3 实测记录](docs/validation-rc3.md)。
 
 浏览器行为测试使用真实 React 和构建后的 bundle，验证轮次/会话切换、排序、精炼刷新、折叠、滚动跟随、条件请求及订阅清理：
 
@@ -117,7 +117,7 @@ npm run test:browser
 显式实测命令（后两项会调用真实模型；不会随 CI 自动运行）：
 
 ```bash
-# 官方源码须为文档指定的 rc.3 commit
+# 将官方源码切换到与已安装 WebServer 一致的发布标签，例如 dsh-v0.2.2-rc.5
 DSH_OFFICIAL_SOURCE=/path/to/deepseek-harness npm run test:desktop
 # 默认从 api_key 环境变量读取已有凭据，不写入配置或输出
 npm run test:live

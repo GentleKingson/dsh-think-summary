@@ -8,6 +8,7 @@ import { Context } from '@deepseek-ai/cordis'
 import LlmRuntime, { BlockAssembler, createToolResultMessage } from '@deepseek-ai/dsh-llm'
 import { DeepSeekAdapter, resolveAdapterOptions } from '@deepseek-ai/dsh-llm-deepseek'
 import WebServer from '@deepseek-ai/dsh-host-webserver'
+import webServerPackage from '@deepseek-ai/dsh-host-webserver/package.json' with { type: 'json' }
 import * as plugin from '../lib/index.js'
 import { sessionFile } from '../lib/host/persist.js'
 import { testHostCookie } from './test-host-cookie.mjs'
@@ -21,7 +22,7 @@ const output = process.env.DSH_LIVE_REPORT
 const home = await mkdtemp(join(tmpdir(), 'think-live-'))
 const previousHome = process.env.DSH_HOME
 process.env.DSH_HOME = home
-const report = { hostVersion: '0.2.2-rc.3', model, startedAt: new Date().toISOString(), status: 'running', calls: [], checks: [] }
+const report = { hostVersion: webServerPackage.version, model, startedAt: new Date().toISOString(), status: 'running', calls: [], checks: [] }
 const ctx = new Context()
 const llmFiber = ctx.plugin(LlmRuntime); await llmFiber
 const serverFiber = ctx.plugin(WebServer, { host: '127.0.0.1', port: 0 }); await serverFiber
@@ -85,17 +86,17 @@ try {
   report.checks.push('Real model produced Chinese segment summaries; side calls have no tools')
   console.log('Running real model tool-call round trip...')
   const tools = [{ name: 'verification_echo', description: 'Return the provided marker for this regression test.', parameters: { type: 'object', properties: { marker: { type: 'string' } }, required: ['marker'], additionalProperties: false } }]
-  const user = { role: 'user', content: [{ type: 'text', text: '请调用 verification_echo，marker 参数必须为 DSH_RC3_TOOL_OK。收到工具结果后，最终答复只输出收到的 marker。' }] }
+  const user = { role: 'user', content: [{ type: 'text', text: '请调用 verification_echo，marker 参数必须为 DSH_TOOL_OK。收到工具结果后，最终答复只输出收到的 marker。' }] }
   const first = await generate([user], tools)
   const call = first.blocks().find(b => b.type === 'tool-call')
   assert.equal(call?.name, 'verification_echo')
   const args = typeof call.arguments === 'string' ? JSON.parse(call.arguments) : call.arguments
-  assert.equal(args.marker, 'DSH_RC3_TOOL_OK')
+  assert.equal(args.marker, 'DSH_TOOL_OK')
   // Execute only this harmless local test tool; never evaluate model-generated commands.
   const toolResult = createToolResultMessage({ callId: call.id, content: [{ type: 'text', text: args.marker }], isError: false })
   const second = await generate([user, first.message({ provider, model }), toolResult], tools)
   report.toolAnswer = second.blocks().filter(b => b.type === 'text').map(b => b.text).join('')
-  assert.ok(report.toolAnswer.includes('DSH_RC3_TOOL_OK'))
+  assert.ok(report.toolAnswer.includes('DSH_TOOL_OK'))
   report.checks.push('Real tool-call -> local verification_echo -> real final answer succeeded')
   await instance.dispose()
   const saved = JSON.parse(await readFile(sessionFile(join(home, 'dsh-think-summary', 'sessions'), sid), 'utf8'))

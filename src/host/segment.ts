@@ -58,6 +58,7 @@ function pendingSplitTokens(max: number): number {
 
 /** max 回溯窗口（字符）：在最近窗口内找句末/行末，避免回溯过深。 */
 const MAX_LOOKBACK = 6000
+const SENTENCE_END = /[。！？!?；;]/
 
 export class Segmenter {
   /** 已确认的段内容（散文/保留的代码/表格行），行尾 \n。 */
@@ -66,6 +67,8 @@ export class Segmenter {
   private other = 0
   /** 未完成行（跨增量拼装，O(行)）。 */
   private pending = ''
+  // Prefix already checked for a sentence ending.
+  private sentenceScanFrom = 0
   /** pending 的原始计数缓存（O(1) 维护，避免拆句循环里反复全量估算）。 */
   private pendingCjk = 0
   private pendingOther = 0
@@ -130,12 +133,15 @@ export class Segmenter {
     }
     this.pendingCjk += raw.cjk
     this.pendingOther += raw.other
+    let newlineFrom = this.pending.length
     this.pending += text
     for (;;) {
-      const nl = this.pending.indexOf('\n')
+      const nl = this.pending.indexOf('\n', newlineFrom)
       if (nl !== -1) {
         const line = this.pending.slice(0, nl)
         this.pending = this.pending.slice(nl + 1)
+        newlineFrom = 0
+        this.sentenceScanFrom = 0
         const lr = countRaw(line)
         this.pendingCjk -= lr.cjk
         this.pendingOther -= lr.other
@@ -146,6 +152,8 @@ export class Segmenter {
       if (this.pending.length > 65_536) {
         const part = this.pending.slice(0, 65_536)
         this.pending = this.pending.slice(65_536)
+        newlineFrom = this.pending.length
+        this.sentenceScanFrom = 0
         const count = countRaw(part)
         this.pendingCjk -= count.cjk
         this.pendingOther -= count.other
@@ -155,21 +163,26 @@ export class Segmenter {
       // 超长无换行行：估算 token 接近半个 max 时按句末标点拆出前部句子
       // （防 pending 滞留影响段大小判定、支持无换行长文本切段）；
       // 围栏/表格行（行首 ``` 或 |）等待行完成
-      const trimmed = this.pending.trimStart()
       if (
         rawToTokens({ cjk: this.pendingCjk, other: this.pendingOther }) > pendingSplitTokens(this.max) &&
-        !FENCE_RE.test(trimmed) &&
-        !this.ignoredTableContinuation && !trimmed.includes('|')
+        !this.ignoredTableContinuation
       ) {
-        const m = this.pending.match(/^[^。！？!?；;]*[。！？!?；;]/)
-        if (m && m[0].length > 0 && m[0].length < this.pending.length) {
-          const sentence = m[0]
-          this.pending = this.pending.slice(sentence.length)
-          const sr = countRaw(sentence)
-          this.pendingCjk -= sr.cjk
-          this.pendingOther -= sr.other
-          this.handleFragment(sentence, false)
-          continue
+        const match = this.pending.slice(this.sentenceScanFrom).search(SENTENCE_END)
+        this.sentenceScanFrom = match === -1 ? this.pending.length : this.sentenceScanFrom + match
+        const end = this.sentenceScanFrom + 1
+        if (end < this.pending.length) {
+          const trimmed = this.pending.trimStart()
+          if (!FENCE_RE.test(trimmed) && !trimmed.includes('|')) {
+            const sentence = this.pending.slice(0, end)
+            this.pending = this.pending.slice(end)
+            newlineFrom = this.pending.length
+            this.sentenceScanFrom = 0
+            const sr = countRaw(sentence)
+            this.pendingCjk -= sr.cjk
+            this.pendingOther -= sr.other
+            this.handleFragment(sentence, false)
+            continue
+          }
         }
       }
       break
@@ -329,6 +342,7 @@ export class Segmenter {
   private finishPendingLine(): void {
     if (this.pending) this.handleFragment(this.pending, true)
     this.pending = ''
+    this.sentenceScanFrom = 0
     this.pendingCjk = 0
     this.pendingOther = 0
     this.ignoredTableContinuation = false
@@ -395,6 +409,7 @@ export class Segmenter {
     this.cjk = 0
     this.other = 0
     this.pending = ''
+    this.sentenceScanFrom = 0
     this.pendingCjk = 0
     this.pendingOther = 0
     this.ignore = 'none'

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { writeFile } from 'node:fs/promises'
 import { Context } from '@deepseek-ai/cordis'
 import LlmRuntime from '@deepseek-ai/dsh-llm'
+import llmPackage from '@deepseek-ai/dsh-llm/package.json' with { type: 'json' }
 import { DeepSeekAdapter, resolveAdapterOptions } from '@deepseek-ai/dsh-llm-deepseek'
 import { RefineQueue } from '../lib/host/summarize/refine.js'
 const key = process.env[process.env.DSH_LIVE_KEY_ENV || 'api_key']
@@ -15,7 +16,7 @@ ctx.llm.registerAdapter(['deepseek-official'], new DeepSeekAdapter({ options: ()
   resolveAuth: async () => ({ headers: { 'x-api-key': key } }), resolveUserId: () => '00000000-0000-4000-8000-000000000001',
   prepareExtensions: async () => ({ fields: {}, accept: async () => {} }),
 }))
-const report = { model, status: 'running', startedAt: new Date().toISOString(), probes: [] }
+const report = { hostVersion: llmPackage.version, model, status: 'running', startedAt: new Date().toISOString(), probes: [] }
 let mode = 'cancel', current, queue
 ctx.on('llm/stream', (options, next) => {
   const probe = { mode, firstProviderDelta: false, signalAborted: false, transportEnded: false }
